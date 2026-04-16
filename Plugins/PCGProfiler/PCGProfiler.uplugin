@@ -1,0 +1,26 @@
+﻿{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "1.0",
+  "FriendlyName": "PCG Profiler",
+  "Description": "Node-level timing profiler for PCG with JSON export.",
+  "Category": "Developer",
+  "CreatedBy": "Codex",
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "IsExperimentalVersion": true,
+  "Installed": false,
+  "Plugins": [
+    {
+      "Name": "PCG",
+      "Enabled": true
+    }
+  ],
+  "Modules": [
+    {
+      "Name": "PCGProfiler",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ]
+}
