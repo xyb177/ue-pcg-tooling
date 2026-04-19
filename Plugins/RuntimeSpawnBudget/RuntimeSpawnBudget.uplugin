@@ -1,0 +1,19 @@
+﻿{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "0.1.0",
+  "FriendlyName": "Runtime Spawn Budget",
+  "Description": "Runtime spawn/destroy budget scheduler with pooling and metrics.",
+  "Category": "Developer",
+  "CreatedBy": "Xu Yibo",
+  "CanContainContent": true,
+  "IsBetaVersion": true,
+  "Installed": false,
+  "Modules": [
+    {
+      "Name": "RuntimeSpawnBudget",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ]
+}
