@@ -101,6 +101,27 @@ struct FRSBFrameStats
 };
 
 USTRUCT(BlueprintType)
+struct FRSBActorClassStats
+{
+    GENERATED_BODY()
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    FName ActorClassName = NAME_None;
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    int32 SampleCount = 0;
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    int32 PoolHitCount = 0;
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    float AvgSpawnCostMs = 0.0f;
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    float P95SpawnCostMs = 0.0f;
+};
+
+USTRUCT(BlueprintType)
 struct FRSBWindowStats
 {
     GENERATED_BODY()
@@ -128,6 +149,42 @@ struct FRSBWindowStats
 
     UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
     int32 PendingQueueLength = 0;
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    TArray<FRSBActorClassStats> ActorClassStats;
+};
+
+USTRUCT(BlueprintType)
+struct FRSBQueueSnapshot
+{
+    GENERATED_BODY()
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    int32 SpawnCritical = 0;
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    int32 SpawnHigh = 0;
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    int32 SpawnNormal = 0;
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    int32 SpawnLow = 0;
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    int32 DestroyCritical = 0;
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    int32 DestroyHigh = 0;
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    int32 DestroyNormal = 0;
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    int32 DestroyLow = 0;
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    int32 PendingAsyncCount = 0;
 };
 
 USTRUCT()

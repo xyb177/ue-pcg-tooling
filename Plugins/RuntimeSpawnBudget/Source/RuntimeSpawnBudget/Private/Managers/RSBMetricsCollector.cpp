@@ -7,6 +7,8 @@ void URSBMetricsCollector::Initialize(int32 InWindowSize)
     WindowSize = FMath::Max(16, InWindowSize);
     QueueDelaySamples.Reset();
     SpawnTimeSamples.Reset();
+    ActorClassSpawnSamples.Reset();
+    ActorClassPoolHitCounts.Reset();
     PoolHits = 0;
     PoolMisses = 0;
 }
@@ -26,6 +28,28 @@ void URSBMetricsCollector::AddQueueDelayMs(float DelayMs)
     if (QueueDelaySamples.Num() > WindowSize)
     {
         QueueDelaySamples.RemoveAt(0, QueueDelaySamples.Num() - WindowSize, EAllowShrinking::No);
+    }
+}
+
+void URSBMetricsCollector::AddActorClassSpawnSample(UClass* ActorClass, float SpawnCostMs, bool bPoolHit)
+{
+    if (!ActorClass)
+    {
+        return;
+    }
+
+    const FName ClassName = ActorClass->GetFName();
+    TArray<float>& Samples = ActorClassSpawnSamples.FindOrAdd(ClassName);
+    Samples.Add(FMath::Max(0.0f, SpawnCostMs));
+    if (Samples.Num() > WindowSize)
+    {
+        Samples.RemoveAt(0, Samples.Num() - WindowSize, EAllowShrinking::No);
+    }
+
+    int32& HitCount = ActorClassPoolHitCounts.FindOrAdd(ClassName);
+    if (bPoolHit)
+    {
+        ++HitCount;
     }
 }
 
@@ -93,6 +117,37 @@ FRSBWindowStats URSBMetricsCollector::BuildWindowStats(int32 PendingQueueLength)
 
     const int32 TotalPoolSamples = PoolHits + PoolMisses;
     Result.PoolHitRate = TotalPoolSamples > 0 ? (static_cast<float>(PoolHits) / static_cast<float>(TotalPoolSamples)) : 0.0f;
+
+    for (const TPair<FName, TArray<float>>& Pair : ActorClassSpawnSamples)
+    {
+        if (Pair.Value.IsEmpty())
+        {
+            continue;
+        }
+
+        TArray<float> Sorted = Pair.Value;
+        Sorted.Sort();
+
+        float Sum = 0.0f;
+        for (float Value : Sorted)
+        {
+            Sum += Value;
+        }
+
+        FRSBActorClassStats ClassStats;
+        ClassStats.ActorClassName = Pair.Key;
+        ClassStats.SampleCount = Sorted.Num();
+        ClassStats.PoolHitCount = ActorClassPoolHitCounts.FindRef(Pair.Key);
+        ClassStats.AvgSpawnCostMs = Sum / static_cast<float>(Sorted.Num());
+        ClassStats.P95SpawnCostMs = ComputePercentile(Sorted, 0.95f);
+        Result.ActorClassStats.Add(MoveTemp(ClassStats));
+    }
+
+    Result.ActorClassStats.Sort([](const FRSBActorClassStats& Left, const FRSBActorClassStats& Right)
+    {
+        return Left.AvgSpawnCostMs > Right.AvgSpawnCostMs;
+    });
+
     return Result;
 }
 

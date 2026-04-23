@@ -6,7 +6,9 @@
 #include "RSBMetricsCollector.h"
 #include "RSBPolicyManager.h"
 #include "RSBPoolManager.h"
+#include "RSBSpawnAsyncAction.h"
 #include "RSBSpawnExecutor.h"
+#include "RSBPressureSpawnerActor.h"
 #include "Interfaces/RSBPoolableInterface.h"
 
 namespace
@@ -64,6 +66,20 @@ void URSBSpawnBudgetSubsystem::Deinitialize()
     DestroyQueues[2].Reset();
     DestroyQueues[3].Reset();
 
+    TArray<int32> PendingIds;
+    PendingSpawnPromises.GenerateKeyArray(PendingIds);
+    for (int32 RequestId : PendingIds)
+    {
+        ResolveAsyncSpawnFailure(RequestId);
+    }
+
+    TArray<int32> PendingActionIds;
+    PendingSpawnActions.GenerateKeyArray(PendingActionIds);
+    for (int32 RequestId : PendingActionIds)
+    {
+        ResolveAsyncSpawnFailure(RequestId);
+    }
+
     SpawnExecutor = nullptr;
     PoolManager = nullptr;
     PolicyManager = nullptr;
@@ -75,21 +91,23 @@ void URSBSpawnBudgetSubsystem::Deinitialize()
 
 bool URSBSpawnBudgetSubsystem::EnqueueSpawn(FRSBSpawnRequest Request)
 {
-    if (!IsSystemEnabled() || !Request.ActorClass)
+    return PrepareSpawnRequest(Request) > 0;
+}
+
+TFuture<AActor*> URSBSpawnBudgetSubsystem::EnqueueSpawnFuture(FRSBSpawnRequest Request)
+{
+    TSharedPtr<TPromise<AActor*>> Promise = MakeShared<TPromise<AActor*>>();
+    TFuture<AActor*> Future = Promise->GetFuture();
+
+    const int32 RequestId = PrepareSpawnRequest(Request);
+    if (RequestId <= 0)
     {
-        return false;
+        Promise->SetValue(nullptr);
+        return Future;
     }
 
-    const int32 PendingCount = GetPendingQueueLength();
-    if (Config && PendingCount >= Config->MaxQueueLength)
-    {
-        return false;
-    }
-
-    Request.RequestId = NextRequestId++;
-    Request.EnqueuedAtSeconds = FPlatformTime::Seconds();
-    SpawnQueues[PriorityToIndex(Request.Priority)].Add(MoveTemp(Request));
-    return true;
+    PendingSpawnPromises.Add(RequestId, Promise);
+    return Future;
 }
 
 bool URSBSpawnBudgetSubsystem::EnqueueDestroy(FRSBDestroyRequest Request)
@@ -136,6 +154,124 @@ FRSBWindowStats URSBSpawnBudgetSubsystem::GetWindowStats_Implementation() const
     return MetricsCollector ? MetricsCollector->BuildWindowStats(GetPendingQueueLength()) : FRSBWindowStats{};
 }
 
+FRSBQueueSnapshot URSBSpawnBudgetSubsystem::GetQueueSnapshot() const
+{
+    FRSBQueueSnapshot Snapshot;
+    Snapshot.SpawnCritical = SpawnQueues[0].Num();
+    Snapshot.SpawnHigh = SpawnQueues[1].Num();
+    Snapshot.SpawnNormal = SpawnQueues[2].Num();
+    Snapshot.SpawnLow = SpawnQueues[3].Num();
+    Snapshot.DestroyCritical = DestroyQueues[0].Num();
+    Snapshot.DestroyHigh = DestroyQueues[1].Num();
+    Snapshot.DestroyNormal = DestroyQueues[2].Num();
+    Snapshot.DestroyLow = DestroyQueues[3].Num();
+    Snapshot.PendingAsyncCount = PendingSpawnPromises.Num() + PendingSpawnActions.Num();
+    return Snapshot;
+}
+
+ARSBPressureSpawnerActor* URSBSpawnBudgetSubsystem::SpawnPressureActor(TSubclassOf<ARSBPressureSpawnerActor> PressureActorClass, const FTransform& SpawnTransform)
+{
+    if (!IsSystemEnabled() || !GetWorld() || !PressureActorClass)
+    {
+        return nullptr;
+    }
+
+    FActorSpawnParameters Params;
+    Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    return GetWorld()->SpawnActor<ARSBPressureSpawnerActor>(PressureActorClass, SpawnTransform, Params);
+}
+
+void URSBSpawnBudgetSubsystem::RegisterAsyncAction(int32 RequestId, URSBSpawnAsyncAction* Action)
+{
+    if (RequestId <= 0 || !Action)
+    {
+        return;
+    }
+
+    PendingSpawnActions.FindOrAdd(RequestId).Add(Action);
+}
+
+void URSBSpawnBudgetSubsystem::UnregisterAsyncAction(int32 RequestId, URSBSpawnAsyncAction* Action)
+{
+    if (RequestId <= 0 || !Action)
+    {
+        return;
+    }
+
+    if (TArray<TWeakObjectPtr<URSBSpawnAsyncAction>>* Actions = PendingSpawnActions.Find(RequestId))
+    {
+        Actions->RemoveAll([Action](const TWeakObjectPtr<URSBSpawnAsyncAction>& Item)
+        {
+            return !Item.IsValid() || Item.Get() == Action;
+        });
+
+        if (Actions->IsEmpty())
+        {
+            PendingSpawnActions.Remove(RequestId);
+        }
+    }
+}
+
+int32 URSBSpawnBudgetSubsystem::PrepareSpawnRequest(FRSBSpawnRequest& Request)
+{
+    if (!IsSystemEnabled() || !Request.ActorClass)
+    {
+        return 0;
+    }
+
+    const int32 PendingCount = GetPendingQueueLength();
+    if (Config && PendingCount >= Config->MaxQueueLength)
+    {
+        return 0;
+    }
+
+    Request.RequestId = NextRequestId++;
+    Request.EnqueuedAtSeconds = FPlatformTime::Seconds();
+    SpawnQueues[PriorityToIndex(Request.Priority)].Add(Request);
+    return Request.RequestId;
+}
+
+void URSBSpawnBudgetSubsystem::ResolveAsyncSpawnResult(int32 RequestId, AActor* Actor)
+{
+    if (RequestId <= 0)
+    {
+        return;
+    }
+
+    if (TSharedPtr<TPromise<AActor*>>* Promise = PendingSpawnPromises.Find(RequestId))
+    {
+        if (Promise->IsValid())
+        {
+            (*Promise)->SetValue(Actor);
+        }
+        PendingSpawnPromises.Remove(RequestId);
+    }
+
+    if (TArray<TWeakObjectPtr<URSBSpawnAsyncAction>>* Actions = PendingSpawnActions.Find(RequestId))
+    {
+        for (TWeakObjectPtr<URSBSpawnAsyncAction> WeakAction : *Actions)
+        {
+            if (URSBSpawnAsyncAction* Action = WeakAction.Get())
+            {
+                if (Actor)
+                {
+                    Action->NotifyCompleted(Actor);
+                }
+                else
+                {
+                    Action->NotifyFailed();
+                }
+            }
+        }
+        PendingSpawnActions.Remove(RequestId);
+    }
+}
+
+void URSBSpawnBudgetSubsystem::ResolveAsyncSpawnFailure(int32 RequestId)
+{
+    ResolveAsyncSpawnResult(RequestId, nullptr);
+}
+
 bool URSBSpawnBudgetSubsystem::Tick(float DeltaTime)
 {
     (void)DeltaTime;
@@ -175,6 +311,7 @@ bool URSBSpawnBudgetSubsystem::Tick(float DeltaTime)
 
             if (Request.DeadlineSeconds >= 0.0f && CurrentSeconds > Request.DeadlineSeconds)
             {
+                ResolveAsyncSpawnFailure(Request.RequestId);
                 ++Dropped;
                 continue;
             }
@@ -185,6 +322,7 @@ bool URSBSpawnBudgetSubsystem::Tick(float DeltaTime)
             }
 
             bool bPoolHit = false;
+            const double SpawnStartSeconds = FPlatformTime::Seconds();
             AActor* SpawnedActor = PoolManager->Acquire(Request, bPoolHit);
             if (SpawnedActor)
             {
@@ -217,7 +355,14 @@ bool URSBSpawnBudgetSubsystem::Tick(float DeltaTime)
 
             if (SpawnedActor)
             {
+                const float SpawnCostMs = static_cast<float>((FPlatformTime::Seconds() - SpawnStartSeconds) * 1000.0);
+                MetricsCollector->AddActorClassSpawnSample(Request.ActorClass.Get(), SpawnCostMs, bPoolHit);
+                ResolveAsyncSpawnResult(Request.RequestId, SpawnedActor);
                 ++SpawnProcessed;
+            }
+            else
+            {
+                ResolveAsyncSpawnFailure(Request.RequestId);
             }
         }
     };

@@ -82,3 +82,15 @@ Engine\Binaries\Win64\UnrealEditor-Cmd.exe "<YourProject>.uproject" `
 
 - Current test set focuses on core runtime logic and regressions.
 - For portfolio/demo usage, pair this with an A/B stress scene to report `P95 frame time`, `P95 queue delay`, and `pool hit rate`.
+
+## Quick stress scene
+
+1. Add a `RuntimeSpawnBudget` enabled project or plugin build.
+2. Place an `ARSBPressureSpawnerActor` in a test map, or call `URSBSpawnBudgetSubsystem::SpawnPressureActor` from a level blueprint.
+3. Set `SpawnActorClass`, `BurstSize`, `BurstCount`, `BurstIntervalSeconds`, and optionally `PoolKey`.
+4. Use `bUseAsyncSpawn=true` to exercise the async path and watch the debug tab for:
+   - queue depth by priority
+   - pending async count
+   - per-class average/P95 spawn cost
+   - pool hit rate
+5. Compare against direct `Spawn/Destroy` in the same map to collect A/B evidence.

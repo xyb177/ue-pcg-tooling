@@ -13,6 +13,7 @@ public:
     void Initialize(int32 InWindowSize);
     void BeginFrame(int64 InFrameNumber, int32 QueueLength);
     void AddQueueDelayMs(float DelayMs);
+    void AddActorClassSpawnSample(UClass* ActorClass, float SpawnCostMs, bool bPoolHit);
     void EndFrame(int32 SpawnProcessed, int32 DestroyProcessed, int32 Dropped, float SpawnTimeMs, float DestroyTimeMs);
 
     void AddPoolHit();
@@ -33,6 +34,8 @@ private:
     FRSBFrameStats LastFrameStats;
     TArray<float> QueueDelaySamples;
     TArray<float> SpawnTimeSamples;
+    TMap<FName, TArray<float>> ActorClassSpawnSamples;
+    TMap<FName, int32> ActorClassPoolHitCounts;
 
     int32 PoolHits = 0;
     int32 PoolMisses = 0;
