@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include "CoreMinimal.h"
+#include "Async/Async.h"
 #include "Async/Future.h"
 #include "Containers/Ticker.h"
 #include "Subsystems/WorldSubsystem.h"
@@ -23,6 +24,7 @@ class RUNTIMESPAWNBUDGET_API URSBSpawnBudgetSubsystem : public UWorldSubsystem, 
 
 public:
     virtual void Initialize(FSubsystemCollectionBase& Collection) override;
+    virtual void OnWorldBeginPlay(UWorld& InWorld) override;
     virtual void Deinitialize() override;
 
     UFUNCTION(BlueprintCallable, Category="RuntimeSpawnBudget")
@@ -46,9 +48,16 @@ public:
     FRSBQueueSnapshot GetQueueSnapshot() const;
 
     UFUNCTION(BlueprintCallable, Category="RuntimeSpawnBudget")
+    TArray<FRSBWorldActorClassEntry> GetWorldActorClassCatalog() const;
+
+    UFUNCTION(BlueprintCallable, Category="RuntimeSpawnBudget")
     ARSBPressureSpawnerActor* SpawnPressureActor(TSubclassOf<ARSBPressureSpawnerActor> PressureActorClass, const FTransform& SpawnTransform);
 
     virtual FRSBWindowStats GetWindowStats_Implementation() const override;
+
+#if WITH_DEV_AUTOMATION_TESTS
+    void SetConfigForTesting(const URSBConfig* InConfig) { Config = InConfig; }
+#endif
 
     void RegisterAsyncAction(int32 RequestId, URSBSpawnAsyncAction* Action);
     void UnregisterAsyncAction(int32 RequestId, URSBSpawnAsyncAction* Action);
@@ -59,6 +68,10 @@ private:
     int32 PriorityToIndex(ERSBRequestPriority Priority) const;
     int32 GetPendingQueueLength() const;
     bool IsSystemEnabled() const;
+    void TryAutoSpawnPressureActor();
+    bool EnqueueSpawnInternal(FRSBSpawnRequest Request);
+    bool EnqueueDestroyInternal(FRSBDestroyRequest Request);
+    TFuture<AActor*> EnqueueSpawnFutureInternal(FRSBSpawnRequest Request, TSharedPtr<TPromise<AActor*>> Promise);
     void ResolveAsyncSpawnResult(int32 RequestId, AActor* Actor);
     void ResolveAsyncSpawnFailure(int32 RequestId);
 
@@ -84,4 +97,5 @@ private:
 
     FTSTicker::FDelegateHandle TickHandle;
     int32 NextRequestId = 1;
+    bool bAutoSpawnPressureActorAttempted = false;
 };

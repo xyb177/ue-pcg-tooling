@@ -2,6 +2,8 @@
 
 #include "Engine/World.h"
 #include "GameFramework/Actor.h"
+#include "Components/ActorComponent.h"
+#include "Components/PrimitiveComponent.h"
 #include "Interfaces/RSBPoolableInterface.h"
 #include "RSBConfig.h"
 
@@ -13,6 +15,20 @@ void URSBPoolManager::Initialize(UWorld* InWorld, const URSBConfig* InConfig)
         DefaultCapacity = FMath::Max(0, InConfig->DefaultPoolCapacity);
         IdleCullSeconds = FMath::Max(1.0f, InConfig->PoolIdleCullSeconds);
     }
+}
+
+int32 URSBPoolManager::GetEffectiveCapacityForClass(TSubclassOf<AActor> ActorClass, FName PoolKey) const
+{
+    const URSBConfig* Config = GetDefault<URSBConfig>();
+    const FName Key = !PoolKey.IsNone() ? PoolKey : (ActorClass ? ActorClass->GetFName() : NAME_None);
+    if (Config)
+    {
+        if (const int32* OverrideCapacity = Config->PerClassPoolCapacityOverrides.Find(Key))
+        {
+            return FMath::Max(0, *OverrideCapacity);
+        }
+    }
+    return FMath::Max(0, DefaultCapacity);
 }
 
 AActor* URSBPoolManager::Acquire(const FRSBSpawnRequest& Request, bool& bOutPoolHit)
@@ -46,6 +62,22 @@ AActor* URSBPoolManager::Acquire(const FRSBSpawnRequest& Request, bool& bOutPool
         Actor->SetActorHiddenInGame(false);
         Actor->SetActorEnableCollision(true);
         Actor->SetActorTickEnabled(true);
+        TInlineComponentArray<UActorComponent*> Components;
+        Actor->GetComponents(Components);
+        for (UActorComponent* Component : Components)
+        {
+            if (!Component)
+            {
+                continue;
+            }
+
+            Component->SetComponentTickEnabled(true);
+            if (UPrimitiveComponent* PrimitiveComponent = Cast<UPrimitiveComponent>(Component))
+            {
+                PrimitiveComponent->SetGenerateOverlapEvents(true);
+                PrimitiveComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+            }
+        }
 
         if (Actor->GetClass()->ImplementsInterface(URSBPoolableInterface::StaticClass()))
         {
@@ -91,7 +123,22 @@ void URSBPoolManager::Release(AActor* Actor, FName PoolKey, bool bForceDestroy)
     Actor->SetActorHiddenInGame(true);
     Actor->SetActorEnableCollision(false);
     Actor->SetActorTickEnabled(false);
-    Actor->SetActorLocation(FVector(0.0f, 0.0f, -1000000.0f));
+    TInlineComponentArray<UActorComponent*> Components;
+    Actor->GetComponents(Components);
+    for (UActorComponent* Component : Components)
+    {
+        if (!Component)
+        {
+            continue;
+        }
+
+        Component->SetComponentTickEnabled(false);
+        if (UPrimitiveComponent* PrimitiveComponent = Cast<UPrimitiveComponent>(Component))
+        {
+            PrimitiveComponent->SetGenerateOverlapEvents(false);
+            PrimitiveComponent->SetCollisionEnabled(ECollisionEnabled::NoCollision);
+        }
+    }
 
     Bucket.InactiveActors.Add(Actor);
     Bucket.LastTouchedSeconds = FPlatformTime::Seconds();
@@ -173,7 +220,7 @@ FRSBPoolBucket& URSBPoolManager::GetOrCreateBucket(FName PoolKey, TSubclassOf<AA
 
     if (Bucket.Capacity <= 0)
     {
-        Bucket.Capacity = DefaultCapacity;
+        Bucket.Capacity = GetEffectiveCapacityForClass(ActorClass, PoolKey);
     }
 
     if (Bucket.LastTouchedSeconds <= 0.0)

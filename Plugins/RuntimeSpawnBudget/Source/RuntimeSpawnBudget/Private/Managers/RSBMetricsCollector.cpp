@@ -7,8 +7,11 @@ void URSBMetricsCollector::Initialize(int32 InWindowSize)
     WindowSize = FMath::Max(16, InWindowSize);
     QueueDelaySamples.Reset();
     SpawnTimeSamples.Reset();
+    FrameTotalTimeSamples.Reset();
     ActorClassSpawnSamples.Reset();
     ActorClassPoolHitCounts.Reset();
+    CachedWindowStats = FRSBWindowStats{};
+    bWindowStatsDirty = true;
     PoolHits = 0;
     PoolMisses = 0;
 }
@@ -29,6 +32,7 @@ void URSBMetricsCollector::AddQueueDelayMs(float DelayMs)
     {
         QueueDelaySamples.RemoveAt(0, QueueDelaySamples.Num() - WindowSize, EAllowShrinking::No);
     }
+    bWindowStatsDirty = true;
 }
 
 void URSBMetricsCollector::AddActorClassSpawnSample(UClass* ActorClass, float SpawnCostMs, bool bPoolHit)
@@ -45,6 +49,7 @@ void URSBMetricsCollector::AddActorClassSpawnSample(UClass* ActorClass, float Sp
     {
         Samples.RemoveAt(0, Samples.Num() - WindowSize, EAllowShrinking::No);
     }
+    bWindowStatsDirty = true;
 
     int32& HitCount = ActorClassPoolHitCounts.FindOrAdd(ClassName);
     if (bPoolHit)
@@ -63,22 +68,32 @@ void URSBMetricsCollector::EndFrame(int32 SpawnProcessed, int32 DestroyProcessed
     LastFrameStats.SpawnTimeMs = SpawnTimeMs;
     LastFrameStats.DestroyTimeMs = DestroyTimeMs;
     LastFrameStats.MaxQueueDelayMs = CurrentMaxQueueDelayMs;
+    LastFrameStats.FrameTotalTimeMs = LastFrameStats.SpawnTimeMs + LastFrameStats.DestroyTimeMs;
 
     SpawnTimeSamples.Add(FMath::Max(0.0f, SpawnTimeMs));
     if (SpawnTimeSamples.Num() > WindowSize)
     {
         SpawnTimeSamples.RemoveAt(0, SpawnTimeSamples.Num() - WindowSize, EAllowShrinking::No);
     }
+
+    FrameTotalTimeSamples.Add(FMath::Max(0.0f, LastFrameStats.FrameTotalTimeMs));
+    if (FrameTotalTimeSamples.Num() > WindowSize)
+    {
+        FrameTotalTimeSamples.RemoveAt(0, FrameTotalTimeSamples.Num() - WindowSize, EAllowShrinking::No);
+    }
+    bWindowStatsDirty = true;
 }
 
 void URSBMetricsCollector::AddPoolHit()
 {
     ++PoolHits;
+    bWindowStatsDirty = true;
 }
 
 void URSBMetricsCollector::AddPoolMiss()
 {
     ++PoolMisses;
+    bWindowStatsDirty = true;
 }
 
 FRSBFrameStats URSBMetricsCollector::GetLastFrameStats() const
@@ -88,6 +103,13 @@ FRSBFrameStats URSBMetricsCollector::GetLastFrameStats() const
 
 FRSBWindowStats URSBMetricsCollector::BuildWindowStats(int32 PendingQueueLength) const
 {
+    if (!bWindowStatsDirty)
+    {
+        FRSBWindowStats Result = CachedWindowStats;
+        Result.PendingQueueLength = PendingQueueLength;
+        return Result;
+    }
+
     FRSBWindowStats Result;
     Result.PendingQueueLength = PendingQueueLength;
 
@@ -114,6 +136,11 @@ FRSBWindowStats URSBMetricsCollector::BuildWindowStats(int32 PendingQueueLength)
 
     BuildStats(QueueDelaySamples, Result.AvgQueueDelayMs, Result.P95QueueDelayMs, Result.P99QueueDelayMs);
     BuildStats(SpawnTimeSamples, Result.AvgSpawnTimeMs, Result.P95SpawnTimeMs, Result.P99SpawnTimeMs);
+    Result.PeakFrameTimeMs = 0.0f;
+    for (float FrameMs : FrameTotalTimeSamples)
+    {
+        Result.PeakFrameTimeMs = FMath::Max(Result.PeakFrameTimeMs, FrameMs);
+    }
 
     const int32 TotalPoolSamples = PoolHits + PoolMisses;
     Result.PoolHitRate = TotalPoolSamples > 0 ? (static_cast<float>(PoolHits) / static_cast<float>(TotalPoolSamples)) : 0.0f;
@@ -148,6 +175,8 @@ FRSBWindowStats URSBMetricsCollector::BuildWindowStats(int32 PendingQueueLength)
         return Left.AvgSpawnCostMs > Right.AvgSpawnCostMs;
     });
 
+    CachedWindowStats = Result;
+    bWindowStatsDirty = false;
     return Result;
 }
 

@@ -98,6 +98,9 @@ struct FRSBFrameStats
 
     UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
     float MaxQueueDelayMs = 0.0f;
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    float FrameTotalTimeMs = 0.0f;
 };
 
 USTRUCT(BlueprintType)
@@ -143,6 +146,9 @@ struct FRSBWindowStats
 
     UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
     float P99SpawnTimeMs = 0.0f;
+
+    UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
+    float PeakFrameTimeMs = 0.0f;
 
     UPROPERTY(VisibleAnywhere, Category="RuntimeSpawnBudget")
     float PoolHitRate = 0.0f;
@@ -212,4 +218,19 @@ struct FRSBPoolBucket
 
     UPROPERTY()
     double LastTouchedSeconds = 0.0;
+};
+
+USTRUCT(BlueprintType)
+struct FRSBWorldActorClassEntry
+{
+    GENERATED_BODY()
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="RuntimeSpawnBudget")
+    FName ActorClassName = NAME_None;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="RuntimeSpawnBudget")
+    int32 Count = 0;
+
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="RuntimeSpawnBudget")
+    bool bIsBlueprintClass = false;
 };

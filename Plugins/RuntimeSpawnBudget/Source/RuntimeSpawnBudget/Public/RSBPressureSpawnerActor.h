@@ -23,6 +23,12 @@ public:
     TSubclassOf<AActor> SpawnActorClass;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RuntimeSpawnBudget")
+    bool bAutoResolveSpawnActorClassFromWorld = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RuntimeSpawnBudget")
+    bool bPreferPlacedActorClass = true;
+
+    UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RuntimeSpawnBudget")
     FName PoolKey = NAME_None;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RuntimeSpawnBudget", meta=(ClampMin="1"))
@@ -45,6 +51,7 @@ public:
 
 private:
     void StartBurstLoop();
+    TSubclassOf<AActor> ResolveSpawnActorClassFromWorld() const;
     void ExecuteBurst();
     void QueueDestroyForTrackedActors();
     UFUNCTION()

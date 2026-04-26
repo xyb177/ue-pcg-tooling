@@ -1,7 +1,9 @@
 #include "RSBSpawnBudgetSubsystem.h"
 
+#include "Async/Async.h"
 #include "Containers/Ticker.h"
 #include "GameFramework/Actor.h"
+#include "EngineUtils.h"
 #include "RSBConfig.h"
 #include "RSBMetricsCollector.h"
 #include "RSBPolicyManager.h"
@@ -47,10 +49,61 @@ void URSBSpawnBudgetSubsystem::Initialize(FSubsystemCollectionBase& Collection)
         TickHandle = FTSTicker::GetCoreTicker().AddTicker(
             FTickerDelegate::CreateUObject(this, &URSBSpawnBudgetSubsystem::Tick));
     }
+
+    UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] Initialize World=%s Enabled=%s MaxSpawnOps=%d MaxDestroyOps=%d MaxQueue=%d AutoSpawnPIE=%s"),
+        *GetNameSafe(GetWorld()),
+        IsSystemEnabled() ? TEXT("true") : TEXT("false"),
+        Config ? Config->MaxSpawnOpsPerFrame : -1,
+        Config ? Config->MaxDestroyOpsPerFrame : -1,
+        Config ? Config->MaxQueueLength : -1,
+        (Config && Config->bAutoSpawnPressureActorInPIE) ? TEXT("true") : TEXT("false"));
+}
+
+void URSBSpawnBudgetSubsystem::OnWorldBeginPlay(UWorld& InWorld)
+{
+    Super::OnWorldBeginPlay(InWorld);
+    UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] OnWorldBeginPlay World=%s Type=%d PIE=%s"), *InWorld.GetName(), static_cast<int32>(InWorld.WorldType), InWorld.IsPlayInEditor() ? TEXT("true") : TEXT("false"));
+    TryAutoSpawnPressureActor();
+
+    if (Config && Config->bAutoPrewarmOnWorldBeginPlay && Config->AutoPrewarmCount > 0)
+    {
+        TSubclassOf<AActor> TargetClass = nullptr;
+        FName PoolKey = NAME_None;
+
+        if (UWorld* World = GetWorld())
+        {
+            for (TActorIterator<ARSBPressureSpawnerActor> It(World); It; ++It)
+            {
+                if (ARSBPressureSpawnerActor* PressureActor = *It)
+                {
+                    if (PressureActor->SpawnActorClass)
+                    {
+                        TargetClass = PressureActor->SpawnActorClass;
+                        PoolKey = PressureActor->PoolKey.IsNone() ? PressureActor->SpawnActorClass->GetFName() : PressureActor->PoolKey;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (TargetClass)
+        {
+            PrewarmPool(TargetClass, PoolKey, Config->AutoPrewarmCount);
+            UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] AutoPrewarm class=%s count=%d"),
+                *GetNameSafe(TargetClass.Get()),
+                Config->AutoPrewarmCount);
+        }
+        else
+        {
+            UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] AutoPrewarm skipped: no target class found on pressure actors"));
+        }
+    }
 }
 
 void URSBSpawnBudgetSubsystem::Deinitialize()
 {
+    UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] Deinitialize World=%s"), *GetNameSafe(GetWorld()));
+
     if (TickHandle.IsValid())
     {
         FTSTicker::GetCoreTicker().RemoveTicker(TickHandle);
@@ -91,7 +144,25 @@ void URSBSpawnBudgetSubsystem::Deinitialize()
 
 bool URSBSpawnBudgetSubsystem::EnqueueSpawn(FRSBSpawnRequest Request)
 {
-    return PrepareSpawnRequest(Request) > 0;
+    if (!IsSystemEnabled())
+    {
+        return false;
+    }
+
+    if (IsInGameThread())
+    {
+        return EnqueueSpawnInternal(MoveTemp(Request));
+    }
+
+    FRSBSpawnRequest Copy = MoveTemp(Request);
+    AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<URSBSpawnBudgetSubsystem>(this), Copy = MoveTemp(Copy)]() mutable
+    {
+        if (URSBSpawnBudgetSubsystem* StrongThis = WeakThis.Get())
+        {
+            StrongThis->EnqueueSpawnInternal(MoveTemp(Copy));
+        }
+    });
+    return true;
 }
 
 TFuture<AActor*> URSBSpawnBudgetSubsystem::EnqueueSpawnFuture(FRSBSpawnRequest Request)
@@ -99,33 +170,52 @@ TFuture<AActor*> URSBSpawnBudgetSubsystem::EnqueueSpawnFuture(FRSBSpawnRequest R
     TSharedPtr<TPromise<AActor*>> Promise = MakeShared<TPromise<AActor*>>();
     TFuture<AActor*> Future = Promise->GetFuture();
 
-    const int32 RequestId = PrepareSpawnRequest(Request);
-    if (RequestId <= 0)
+    if (!IsSystemEnabled())
     {
         Promise->SetValue(nullptr);
         return Future;
     }
 
-    PendingSpawnPromises.Add(RequestId, Promise);
+    if (IsInGameThread())
+    {
+        return EnqueueSpawnFutureInternal(MoveTemp(Request), Promise);
+    }
+
+    FRSBSpawnRequest Copy = MoveTemp(Request);
+    AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<URSBSpawnBudgetSubsystem>(this), Copy = MoveTemp(Copy), Promise]() mutable
+    {
+        if (URSBSpawnBudgetSubsystem* StrongThis = WeakThis.Get())
+        {
+            StrongThis->EnqueueSpawnFutureInternal(MoveTemp(Copy), Promise);
+        }
+        else
+        {
+            Promise->SetValue(nullptr);
+        }
+    });
     return Future;
 }
 
 bool URSBSpawnBudgetSubsystem::EnqueueDestroy(FRSBDestroyRequest Request)
 {
-    if (!IsSystemEnabled() || !Request.Actor.IsValid())
+    if (!IsSystemEnabled())
     {
         return false;
     }
 
-    const int32 PendingCount = GetPendingQueueLength();
-    if (Config && PendingCount >= Config->MaxQueueLength)
+    if (IsInGameThread())
     {
-        return false;
+        return EnqueueDestroyInternal(MoveTemp(Request));
     }
 
-    Request.RequestId = NextRequestId++;
-    Request.EnqueuedAtSeconds = FPlatformTime::Seconds();
-    DestroyQueues[PriorityToIndex(Request.Priority)].Add(MoveTemp(Request));
+    FRSBDestroyRequest Copy = MoveTemp(Request);
+    AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<URSBSpawnBudgetSubsystem>(this), Copy = MoveTemp(Copy)]() mutable
+    {
+        if (URSBSpawnBudgetSubsystem* StrongThis = WeakThis.Get())
+        {
+            StrongThis->EnqueueDestroyInternal(MoveTemp(Copy));
+        }
+    });
     return true;
 }
 
@@ -167,6 +257,54 @@ FRSBQueueSnapshot URSBSpawnBudgetSubsystem::GetQueueSnapshot() const
     Snapshot.DestroyLow = DestroyQueues[3].Num();
     Snapshot.PendingAsyncCount = PendingSpawnPromises.Num() + PendingSpawnActions.Num();
     return Snapshot;
+}
+
+TArray<FRSBWorldActorClassEntry> URSBSpawnBudgetSubsystem::GetWorldActorClassCatalog() const
+{
+    TArray<FRSBWorldActorClassEntry> Result;
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return Result;
+    }
+
+    TMap<FName, FRSBWorldActorClassEntry> Entries;
+    for (TActorIterator<AActor> It(World); It; ++It)
+    {
+        const AActor* Actor = *It;
+        if (!Actor || Actor->IsA<ARSBPressureSpawnerActor>() || Actor->IsA<AWorldSettings>())
+        {
+            continue;
+        }
+
+        UClass* ActorClass = Actor->GetClass();
+        if (!ActorClass || ActorClass->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists))
+        {
+            continue;
+        }
+
+        const FName ClassName = ActorClass->GetFName();
+        FRSBWorldActorClassEntry& Entry = Entries.FindOrAdd(ClassName);
+        Entry.ActorClassName = ClassName;
+        Entry.Count += 1;
+        Entry.bIsBlueprintClass = ActorClass->HasAnyClassFlags(CLASS_CompiledFromBlueprint);
+    }
+
+    for (const TPair<FName, FRSBWorldActorClassEntry>& Pair : Entries)
+    {
+        Result.Add(Pair.Value);
+    }
+
+    Result.Sort([](const FRSBWorldActorClassEntry& Left, const FRSBWorldActorClassEntry& Right)
+    {
+        if (Left.Count != Right.Count)
+        {
+            return Left.Count > Right.Count;
+        }
+        return Left.ActorClassName.LexicalLess(Right.ActorClassName);
+    });
+
+    return Result;
 }
 
 ARSBPressureSpawnerActor* URSBSpawnBudgetSubsystem::SpawnPressureActor(TSubclassOf<ARSBPressureSpawnerActor> PressureActorClass, const FTransform& SpawnTransform)
@@ -214,6 +352,7 @@ void URSBSpawnBudgetSubsystem::UnregisterAsyncAction(int32 RequestId, URSBSpawnA
 
 int32 URSBSpawnBudgetSubsystem::PrepareSpawnRequest(FRSBSpawnRequest& Request)
 {
+    check(IsInGameThread());
     if (!IsSystemEnabled() || !Request.ActorClass)
     {
         return 0;
@@ -229,6 +368,46 @@ int32 URSBSpawnBudgetSubsystem::PrepareSpawnRequest(FRSBSpawnRequest& Request)
     Request.EnqueuedAtSeconds = FPlatformTime::Seconds();
     SpawnQueues[PriorityToIndex(Request.Priority)].Add(Request);
     return Request.RequestId;
+}
+
+bool URSBSpawnBudgetSubsystem::EnqueueSpawnInternal(FRSBSpawnRequest Request)
+{
+    return PrepareSpawnRequest(Request) > 0;
+}
+
+TFuture<AActor*> URSBSpawnBudgetSubsystem::EnqueueSpawnFutureInternal(FRSBSpawnRequest Request, TSharedPtr<TPromise<AActor*>> Promise)
+{
+    TFuture<AActor*> Future = Promise->GetFuture();
+    const int32 RequestId = PrepareSpawnRequest(Request);
+    if (RequestId <= 0)
+    {
+        Promise->SetValue(nullptr);
+        return Future;
+    }
+
+    PendingSpawnPromises.Add(RequestId, Promise);
+    return Future;
+}
+
+bool URSBSpawnBudgetSubsystem::EnqueueDestroyInternal(FRSBDestroyRequest Request)
+{
+    check(IsInGameThread());
+
+    if (!Request.Actor.IsValid())
+    {
+        return false;
+    }
+
+    const int32 PendingCount = GetPendingQueueLength();
+    if (Config && PendingCount >= Config->MaxQueueLength)
+    {
+        return false;
+    }
+
+    Request.RequestId = NextRequestId++;
+    Request.EnqueuedAtSeconds = FPlatformTime::Seconds();
+    DestroyQueues[PriorityToIndex(Request.Priority)].Add(MoveTemp(Request));
+    return true;
 }
 
 void URSBSpawnBudgetSubsystem::ResolveAsyncSpawnResult(int32 RequestId, AActor* Actor)
@@ -280,6 +459,10 @@ bool URSBSpawnBudgetSubsystem::Tick(float DeltaTime)
     {
         return true;
     }
+
+#if WITH_EDITOR
+    TryAutoSpawnPressureActor();
+#endif
 
     const double FrameStartSeconds = FPlatformTime::Seconds();
     const int32 PendingQueueLength = GetPendingQueueLength();
@@ -461,4 +644,58 @@ int32 URSBSpawnBudgetSubsystem::GetPendingQueueLength() const
 bool URSBSpawnBudgetSubsystem::IsSystemEnabled() const
 {
     return Config ? Config->bEnableSystem : true;
+}
+
+void URSBSpawnBudgetSubsystem::TryAutoSpawnPressureActor()
+{
+    if (bAutoSpawnPressureActorAttempted)
+    {
+        return;
+    }
+
+    UWorld* World = GetWorld();
+    if (!World || !Config || !Config->bAutoSpawnPressureActorInPIE)
+    {
+        return;
+    }
+
+    const EWorldType::Type WorldType = World->WorldType;
+    const bool bCanAutoSpawn = (WorldType == EWorldType::PIE || WorldType == EWorldType::GamePreview || WorldType == EWorldType::Game);
+    if (!bCanAutoSpawn)
+    {
+        return;
+    }
+
+    bAutoSpawnPressureActorAttempted = true;
+
+    bool bHasPressureActor = false;
+    for (TActorIterator<ARSBPressureSpawnerActor> It(World); It; ++It)
+    {
+        bHasPressureActor = true;
+        break;
+    }
+
+    UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] TryAutoSpawnPressureActor World=%s Type=%d HasPressureActor=%s"),
+        *World->GetName(), static_cast<int32>(WorldType), bHasPressureActor ? TEXT("true") : TEXT("false"));
+
+    if (bHasPressureActor)
+    {
+        return;
+    }
+
+    FActorSpawnParameters Params;
+    Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
+    ARSBPressureSpawnerActor* PressureActor = World->SpawnActor<ARSBPressureSpawnerActor>(
+        ARSBPressureSpawnerActor::StaticClass(),
+        FTransform::Identity,
+        Params);
+
+    UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] AutoSpawnPressureActor Result=%s"), PressureActor ? TEXT("success") : TEXT("failed"));
+
+    if (PressureActor)
+    {
+#if WITH_EDITOR
+        PressureActor->SetActorLabel(TEXT("RSB_AutoPressureSpawner"));
+#endif
+    }
 }

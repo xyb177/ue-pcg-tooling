@@ -1,6 +1,8 @@
 #include "RSBPressureSpawnerActor.h"
 
 #include "Engine/World.h"
+#include "GameFramework/WorldSettings.h"
+#include "EngineUtils.h"
 #include "TimerManager.h"
 #include "RSBSpawnAsyncAction.h"
 #include "RSBSpawnBudgetSubsystem.h"
@@ -8,11 +10,33 @@
 ARSBPressureSpawnerActor::ARSBPressureSpawnerActor()
 {
     PrimaryActorTick.bCanEverTick = false;
+    SpawnActorClass = AActor::StaticClass();
 }
 
 void ARSBPressureSpawnerActor::BeginPlay()
 {
     Super::BeginPlay();
+
+    if (bAutoResolveSpawnActorClassFromWorld)
+    {
+        if (TSubclassOf<AActor> ResolvedClass = ResolveSpawnActorClassFromWorld())
+        {
+            SpawnActorClass = ResolvedClass;
+        }
+    }
+
+    if (!SpawnActorClass)
+    {
+        SpawnActorClass = AActor::StaticClass();
+    }
+
+    UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] PressureActor BeginPlay=%s SpawnClass=%s BurstSize=%d BurstCount=%d Async=%s"),
+        *GetName(),
+        SpawnActorClass ? *SpawnActorClass->GetName() : TEXT("None"),
+        BurstSize,
+        BurstCount,
+        bUseAsyncSpawn ? TEXT("true") : TEXT("false"));
+
     StartBurstLoop();
 }
 
@@ -33,9 +57,11 @@ void ARSBPressureSpawnerActor::StartBurstLoop()
     RemainingBursts = FMath::Max(0, BurstCount);
     if (RemainingBursts <= 0)
     {
+        UE_LOG(LogTemp, Warning, TEXT("[RuntimeSpawnBudget] PressureActor StartBurstLoop aborted: BurstCount <= 0 for %s"), *GetName());
         return;
     }
 
+    UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] PressureActor StartBurstLoop=%s RemainingBursts=%d"), *GetName(), RemainingBursts);
     ExecuteBurst();
 
     if (UWorld* World = GetWorld())
@@ -52,16 +78,75 @@ void ARSBPressureSpawnerActor::StartBurstLoop()
     }
 }
 
+TSubclassOf<AActor> ARSBPressureSpawnerActor::ResolveSpawnActorClassFromWorld() const
+{
+    UWorld* World = GetWorld();
+    if (!World)
+    {
+        return nullptr;
+    }
+
+    if (!bPreferPlacedActorClass)
+    {
+        return SpawnActorClass;
+    }
+
+    for (TActorIterator<AActor> It(World); It; ++It)
+    {
+        AActor* Candidate = *It;
+        if (!Candidate || Candidate == this)
+        {
+            continue;
+        }
+
+        if (Candidate->IsA<ARSBPressureSpawnerActor>())
+        {
+            continue;
+        }
+
+        if (Candidate->IsA<AWorldSettings>())
+        {
+            continue;
+        }
+
+        UClass* CandidateClass = Candidate->GetClass();
+        if (CandidateClass && !CandidateClass->HasAnyClassFlags(CLASS_Abstract | CLASS_Deprecated | CLASS_NewerVersionExists))
+        {
+            UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] PressureActor resolved SpawnClass from world actor %s -> %s"),
+                *GetNameSafe(Candidate),
+                *GetNameSafe(CandidateClass));
+            return CandidateClass;
+        }
+    }
+
+    return SpawnActorClass;
+}
+
 void ARSBPressureSpawnerActor::ExecuteBurst()
 {
     URSBSpawnBudgetSubsystem* Subsystem = ResolveSubsystem();
-    if (!Subsystem || !SpawnActorClass)
+    if (!Subsystem)
     {
+        UE_LOG(LogTemp, Warning, TEXT("[RuntimeSpawnBudget] PressureActor ExecuteBurst failed: subsystem missing for %s"), *GetName());
         RemainingBursts = 0;
         return;
     }
 
+    if (!SpawnActorClass)
+    {
+        SpawnActorClass = ResolveSpawnActorClassFromWorld();
+        if (!SpawnActorClass)
+        {
+            SpawnActorClass = AActor::StaticClass();
+        }
+    }
+
     const int32 BatchSize = FMath::Max(1, BurstSize);
+    UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] PressureActor ExecuteBurst=%s BatchSize=%d Async=%s Class=%s"),
+        *GetName(),
+        BatchSize,
+        bUseAsyncSpawn ? TEXT("true") : TEXT("false"),
+        SpawnActorClass ? *SpawnActorClass->GetName() : TEXT("None"));
     for (int32 Index = 0; Index < BatchSize; ++Index)
     {
         FRSBSpawnRequest Request;
@@ -78,11 +163,17 @@ void ARSBPressureSpawnerActor::ExecuteBurst()
                 Action->OnCompleted.AddDynamic(this, &ARSBPressureSpawnerActor::HandleAsyncSpawnCompleted);
                 Action->OnFailed.AddDynamic(this, &ARSBPressureSpawnerActor::HandleAsyncSpawnFailed);
                 Action->Activate();
+                UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] PressureActor async request queued: %s"), *GetName());
+            }
+            else
+            {
+                UE_LOG(LogTemp, Warning, TEXT("[RuntimeSpawnBudget] PressureActor async action creation failed: %s"), *GetName());
             }
         }
         else
         {
-            Subsystem->EnqueueSpawn(Request);
+            const bool bEnqueued = Subsystem->EnqueueSpawn(Request);
+            UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] PressureActor sync enqueue: %s result=%s"), *GetName(), bEnqueued ? TEXT("true") : TEXT("false"));
         }
     }
 
@@ -135,15 +226,18 @@ void ARSBPressureSpawnerActor::HandleAsyncSpawnCompleted(AActor* SpawnedActor)
     if (SpawnedActor)
     {
         TrackedSpawnedActors.Add(SpawnedActor);
+        UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] PressureActor async completed: %s -> %s"), *GetName(), *GetNameSafe(SpawnedActor));
     }
 }
 
 void ARSBPressureSpawnerActor::HandleAsyncSpawnFailed()
 {
+    UE_LOG(LogTemp, Warning, TEXT("[RuntimeSpawnBudget] PressureActor async failed: %s"), *GetName());
 }
 
 void ARSBPressureSpawnerActor::HandleDestroyTimer()
 {
+    UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] PressureActor destroy timer fired: %s tracked=%d"), *GetName(), TrackedSpawnedActors.Num());
     QueueDestroyForTrackedActors();
 }
 

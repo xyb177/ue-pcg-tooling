@@ -1,6 +1,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 
 #include "Misc/AutomationTest.h"
+#include "GameFramework/Pawn.h"
 #include "RSBMetricsCollector.h"
 
 IMPLEMENT_SIMPLE_AUTOMATION_TEST(FRuntimeSpawnBudgetActorClassSpec, "RuntimeSpawnBudget.Metrics.ActorClassStats", EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)

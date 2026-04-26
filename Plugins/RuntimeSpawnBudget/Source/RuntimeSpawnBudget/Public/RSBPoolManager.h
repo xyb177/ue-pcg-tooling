@@ -18,6 +18,7 @@ public:
     void Release(AActor* Actor, FName PoolKey, bool bForceDestroy);
     void Prewarm(TSubclassOf<AActor> ActorClass, FName PoolKey, int32 Count);
     void CullIdlePools(double NowSeconds);
+    int32 GetEffectiveCapacityForClass(TSubclassOf<AActor> ActorClass, FName PoolKey = NAME_None) const;
 
 private:
     FName ResolvePoolKey(const FRSBSpawnRequest& Request) const;

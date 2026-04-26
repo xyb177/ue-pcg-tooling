@@ -34,8 +34,11 @@ private:
     FRSBFrameStats LastFrameStats;
     TArray<float> QueueDelaySamples;
     TArray<float> SpawnTimeSamples;
+    TArray<float> FrameTotalTimeSamples;
     TMap<FName, TArray<float>> ActorClassSpawnSamples;
     TMap<FName, int32> ActorClassPoolHitCounts;
+    mutable bool bWindowStatsDirty = true;
+    mutable FRSBWindowStats CachedWindowStats;
 
     int32 PoolHits = 0;
     int32 PoolMisses = 0;

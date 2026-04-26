@@ -26,6 +26,7 @@ public class RuntimeSpawnBudget : ModuleRules
             PrivateDependencyModuleNames.AddRange(
                 new string[]
                 {
+                    "InputCore",
                     "Slate",
                     "SlateCore",
                     "UMG",
