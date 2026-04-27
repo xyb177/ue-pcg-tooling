@@ -1,9 +1,10 @@
-
+﻿
 #include "SPCGProfilerPanel.h"
 
 #include "PCGProfilerSubsystem.h"
 
 #if WITH_EDITOR
+#include "Interfaces/IPluginManager.h"
 #include "HAL/PlatformFileManager.h"
 #include "HAL/FileManager.h"
 #include "Misc/DateTime.h"
@@ -33,12 +34,37 @@ namespace PCGProfilerPanelInternal
 {
     static FString FormatMs(const double Value)
     {
-        return FString::Printf(TEXT("%.2f"), Value);
+        const double AbsValue = FMath::Abs(Value);
+        if (AbsValue >= 100.0) { return FString::Printf(TEXT("%.1f"), Value); }
+        if (AbsValue >= 10.0) { return FString::Printf(TEXT("%.2f"), Value); }
+        if (AbsValue >= 1.0) { return FString::Printf(TEXT("%.3f"), Value); }
+        if (AbsValue >= 0.01) { return FString::Printf(TEXT("%.4f"), Value); }
+        if (AbsValue >= 0.0001) { return FString::Printf(TEXT("%.6f"), Value); }
+        if (AbsValue > 0.0) { return FString::Printf(TEXT("<%.4f"), 0.0001); }
+        return TEXT("0");
     }
 
     static FString FormatPercent(const double Value01)
     {
         return FString::Printf(TEXT("%.1f%%"), Value01 * 100.0);
+    }
+
+    static FString FormatPoints(const int64 Points)
+    {
+        const int64 AbsPts = FMath::Abs(Points);
+        if (AbsPts >= 1'000'000'000) { return FString::Printf(TEXT("%.1fB"), static_cast<double>(Points) / 1'000'000'000.0); }
+        if (AbsPts >= 1'000'000)     { return FString::Printf(TEXT("%.1fM"), static_cast<double>(Points) / 1'000'000.0); }
+        if (AbsPts >= 1'000)         { return FString::Printf(TEXT("%.1fK"), static_cast<double>(Points) / 1'000.0); }
+        return FString::Printf(TEXT("%lld"), Points);
+    }
+
+    static FString FormatBytes(const int64 Bytes)
+    {
+        const int64 AbsBytes = FMath::Abs(Bytes);
+        if (AbsBytes >= 1'073'741'824ll) { return FString::Printf(TEXT("%.1f GB"), static_cast<double>(Bytes) / 1'073'741'824.0); }
+        if (AbsBytes >= 1'048'576ll)     { return FString::Printf(TEXT("%.1f MB"), static_cast<double>(Bytes) / 1'048'576.0); }
+        if (AbsBytes >= 1'024ll)         { return FString::Printf(TEXT("%.1f KB"), static_cast<double>(Bytes) / 1'024.0); }
+        return FString::Printf(TEXT("%lld B"), Bytes);
     }
 
     static FString ExtractComponentObjectPath(const FString& ExecutionPath)
@@ -143,6 +169,87 @@ namespace PCGProfilerPanelInternal
         }
         return Numerator > 0.0 ? 1.0 : 0.0;
     }
+
+    static bool IsRuntimeRunMode(const FString& RunMode)
+    {
+        return RunMode.Equals(TEXT("pie"), ESearchCase::IgnoreCase)
+            || RunMode.Equals(TEXT("standalone"), ESearchCase::IgnoreCase)
+            || RunMode.Equals(TEXT("packaged"), ESearchCase::IgnoreCase)
+            || RunMode.Equals(TEXT("runtime"), ESearchCase::IgnoreCase);
+    }
+
+    static FString ResolveCurrentRunModeFallback()
+    {
+        if (!GEngine)
+        {
+            return GIsEditor ? TEXT("editor") : TEXT("runtime");
+        }
+
+        int32 BestPriority = -1;
+        FString BestMode = GIsEditor ? TEXT("editor") : TEXT("runtime");
+        for (const FWorldContext& Context : GEngine->GetWorldContexts())
+        {
+            const UWorld* World = Context.World();
+            if (!World)
+            {
+                continue;
+            }
+
+            int32 Priority = -1;
+            FString Mode = TEXT("runtime");
+            if (World->WorldType == EWorldType::PIE)
+            {
+                Priority = 3;
+                Mode = TEXT("pie");
+            }
+            else if (World->WorldType == EWorldType::Game)
+            {
+                Priority = 2;
+                Mode = FPlatformProperties::RequiresCookedData() ? TEXT("packaged") : TEXT("standalone");
+            }
+            else if (World->WorldType == EWorldType::Editor || World->WorldType == EWorldType::EditorPreview)
+            {
+                Priority = 1;
+                Mode = TEXT("editor");
+            }
+
+            if (Priority > BestPriority)
+            {
+                BestPriority = Priority;
+                BestMode = Mode;
+            }
+        }
+        return BestMode;
+    }
+
+    static FString ResolveEventRunMode(const FPCGProfilerNodeEvent& Event, const FString& FallbackRunMode)
+    {
+        if (!Event.RunMode.IsEmpty())
+        {
+            return Event.RunMode;
+        }
+        return FallbackRunMode;
+    }
+
+    static bool MatchRunMode(const FString& RunMode, const FString& FilterToken)
+    {
+        if (FilterToken.IsEmpty() || FilterToken.Equals(TEXT("all"), ESearchCase::IgnoreCase))
+        {
+            return true;
+        }
+
+        if (FilterToken.Equals(TEXT("editor"), ESearchCase::IgnoreCase))
+        {
+            return !IsRuntimeRunMode(RunMode);
+        }
+
+        if (FilterToken.Equals(TEXT("runtime"), ESearchCase::IgnoreCase))
+        {
+            return IsRuntimeRunMode(RunMode);
+        }
+
+        return RunMode.Contains(FilterToken, ESearchCase::IgnoreCase);
+    }
 }
 
 class SPCGProfilerNodeRow : public SMultiColumnTableRow<TSharedPtr<SPCGProfilerPanel::FNodeItem>>
@@ -166,10 +273,15 @@ public:
         if (ColumnName == TEXT("NodeId")) { Value = A.NodeId; }
         else if (ColumnName == TEXT("Node")) { Value = A.NodeName; }
         else if (ColumnName == TEXT("Graph")) { Value = A.GraphName; }
+        else if (ColumnName == TEXT("Mode")) { Value = Item->RunModeBucket; }
         else if (ColumnName == TEXT("TotalMs")) { Value = PCGProfilerPanelInternal::FormatMs(A.TotalMs); }
         else if (ColumnName == TEXT("P95Ms")) { Value = PCGProfilerPanelInternal::FormatMs(A.P95Ms); }
         else if (ColumnName == TEXT("Calls")) { Value = FString::FromInt(A.CallCount); }
-        else if (ColumnName == TEXT("GTRatio")) { Value = PCGProfilerPanelInternal::FormatPercent(A.GameThreadRatio); }
+        else if (ColumnName == TEXT("SelfMs")) { Value = PCGProfilerPanelInternal::FormatMs(A.SelfMs); }
+        else if (ColumnName == TEXT("WkRatio")) { Value = PCGProfilerPanelInternal::FormatPercent(A.WorkerThreadRatio); }
+        else if (ColumnName == TEXT("PtsK")) { Value = PCGProfilerPanelInternal::FormatPoints(A.InputPointsMax); }
+    else if (ColumnName == TEXT("GTRatio")) { Value = PCGProfilerPanelInternal::FormatPercent(A.GameThreadRatio); }
+    else if (ColumnName == TEXT("NonZero")) { Value = PCGProfilerPanelInternal::FormatPercent(Item->DurationNonZeroRate); }
         else if (ColumnName == TEXT("HitRate")) { Value = PCGProfilerPanelInternal::FormatPercent(A.CacheHitRate); }
         return SNew(STextBlock).Text(FText::FromString(Value)).ToolTipText(FText::FromString(Value));
     }
@@ -198,10 +310,10 @@ public:
     {
         const FPCGProfilerNodeEvent& E = Item->Event;
         FString Value;
-        if (ColumnName == TEXT("Time")) { Value = FString::Printf(TEXT("%.1f"), FMath::Max(0.0, E.FirstSeenTimeMs - StartOffsetMs)); }
+    if (ColumnName == TEXT("Time")) { Value = PCGProfilerPanelInternal::FormatMs(FMath::Max(0.0, E.FirstSeenTimeMs - StartOffsetMs)); }
         else if (ColumnName == TEXT("Thread")) { Value = E.ThreadGroup; }
         else if (ColumnName == TEXT("Node")) { Value = E.NodeTitle; }
-        else if (ColumnName == TEXT("DurMs")) { Value = FString::Printf(TEXT("%.2f"), E.InclusiveMs); }
+    else if (ColumnName == TEXT("DurMs")) { Value = PCGProfilerPanelInternal::FormatMs(E.InclusiveMs); }
         else if (ColumnName == TEXT("Cache")) { Value = E.bCacheHit ? TEXT("hit") : FString::Printf(TEXT("miss(%s)"), E.CacheMissReason.IsEmpty() ? TEXT("unknown") : *E.CacheMissReason); }
         return SNew(STextBlock).Text(FText::FromString(Value)).ToolTipText(FText::FromString(Value));
     }
@@ -244,6 +356,12 @@ void SPCGProfilerPanel::Construct(const FArguments& InArgs)
                 + SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 8, 0)
                 [
                     SNew(SButton)
+                    .Text_Lambda([this]() { return FText::FromString(FString::Printf(TEXT("Mode: %s"), *RunModeFilter)); })
+                    .OnClicked(this, &SPCGProfilerPanel::OnCycleRunModeFilterClicked)
+                ]
+                + SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 8, 0)
+                [
+                    SNew(SButton)
                     .Text_Lambda([this]() { return FText::FromString(bAutoGenerateHtml ? TEXT("Auto HTML: ON") : TEXT("Auto HTML: OFF")); })
                     .OnClicked(this, &SPCGProfilerPanel::OnToggleAutoHtmlClicked)
                 ]
@@ -265,7 +383,7 @@ void SPCGProfilerPanel::Construct(const FArguments& InArgs)
                         + SScrollBox::Slot()
                         [
                             SNew(SBox)
-                            .MinDesiredWidth(1400.0f)
+                            .MinDesiredWidth(1800.0f)
                             [
                                 SAssignNew(NodeListView, SListView<TSharedPtr<FNodeItem>>)
                                 .ListItemsSource(&FilteredItems)
@@ -277,11 +395,34 @@ void SPCGProfilerPanel::Construct(const FArguments& InArgs)
                                     + SHeaderRow::Column(TEXT("NodeId")).DefaultLabel(FText::FromString(TEXT("NodeId"))).FillWidth(0.18f)
                                     + SHeaderRow::Column(TEXT("Node")).DefaultLabel(FText::FromString(TEXT("Node"))).FillWidth(0.28f)
                                     + SHeaderRow::Column(TEXT("Graph")).DefaultLabel(FText::FromString(TEXT("Graph"))).FillWidth(0.16f)
-                                    + SHeaderRow::Column(TEXT("Calls")).DefaultLabel(FText::FromString(TEXT("Calls"))).FillWidth(0.08f)
-                                    + SHeaderRow::Column(TEXT("TotalMs")).DefaultLabel(FText::FromString(TEXT("Total(ms)"))).FillWidth(0.10f)
-                                    + SHeaderRow::Column(TEXT("P95Ms")).DefaultLabel(FText::FromString(TEXT("P95"))).FillWidth(0.08f)
-                                    + SHeaderRow::Column(TEXT("GTRatio")).DefaultLabel(FText::FromString(TEXT("GT%"))).FillWidth(0.06f)
-                                    + SHeaderRow::Column(TEXT("HitRate")).DefaultLabel(FText::FromString(TEXT("HitRate"))).FillWidth(0.06f)
+                                    + SHeaderRow::Column(TEXT("Mode")).DefaultLabel(FText::FromString(TEXT("Mode"))).FillWidth(0.08f)
+                                    + SHeaderRow::Column(TEXT("Calls")).DefaultLabel(FText::FromString(TEXT("Calls"))).FillWidth(0.06f)
+                                    .OnSort(this, &SPCGProfilerPanel::OnColumnSort)
+                                    .SortMode(TAttribute<EColumnSortMode::Type>::CreateLambda([this] { return GetColumnSortMode(TEXT("Calls")); }))
+                                + SHeaderRow::Column(TEXT("TotalMs")).DefaultLabel(FText::FromString(TEXT("Total(ms)"))).FillWidth(0.08f)
+                                    .OnSort(this, &SPCGProfilerPanel::OnColumnSort)
+                                    .SortMode(TAttribute<EColumnSortMode::Type>::CreateLambda([this] { return GetColumnSortMode(TEXT("TotalMs")); }))
+                                + SHeaderRow::Column(TEXT("SelfMs")).DefaultLabel(FText::FromString(TEXT("Self"))).FillWidth(0.08f)
+                                    .OnSort(this, &SPCGProfilerPanel::OnColumnSort)
+                                    .SortMode(TAttribute<EColumnSortMode::Type>::CreateLambda([this] { return GetColumnSortMode(TEXT("SelfMs")); }))
+                                + SHeaderRow::Column(TEXT("P95Ms")).DefaultLabel(FText::FromString(TEXT("P95"))).FillWidth(0.07f)
+                                    .OnSort(this, &SPCGProfilerPanel::OnColumnSort)
+                                    .SortMode(TAttribute<EColumnSortMode::Type>::CreateLambda([this] { return GetColumnSortMode(TEXT("P95Ms")); }))
+                                + SHeaderRow::Column(TEXT("GTRatio")).DefaultLabel(FText::FromString(TEXT("GT%"))).FillWidth(0.05f)
+                                    .OnSort(this, &SPCGProfilerPanel::OnColumnSort)
+                                    .SortMode(TAttribute<EColumnSortMode::Type>::CreateLambda([this] { return GetColumnSortMode(TEXT("GTRatio")); }))
+                                + SHeaderRow::Column(TEXT("WkRatio")).DefaultLabel(FText::FromString(TEXT("Wk%"))).FillWidth(0.05f)
+                                    .OnSort(this, &SPCGProfilerPanel::OnColumnSort)
+                                    .SortMode(TAttribute<EColumnSortMode::Type>::CreateLambda([this] { return GetColumnSortMode(TEXT("WkRatio")); }))
+                                + SHeaderRow::Column(TEXT("PtsK")).DefaultLabel(FText::FromString(TEXT("Pts"))).FillWidth(0.06f)
+                                    .OnSort(this, &SPCGProfilerPanel::OnColumnSort)
+                                    .SortMode(TAttribute<EColumnSortMode::Type>::CreateLambda([this] { return GetColumnSortMode(TEXT("PtsK")); }))
+                                + SHeaderRow::Column(TEXT("NonZero")).DefaultLabel(FText::FromString(TEXT("NonZero%"))).FillWidth(0.06f)
+                                    .OnSort(this, &SPCGProfilerPanel::OnColumnSort)
+                                    .SortMode(TAttribute<EColumnSortMode::Type>::CreateLambda([this] { return GetColumnSortMode(TEXT("NonZero")); }))
+                                + SHeaderRow::Column(TEXT("HitRate")).DefaultLabel(FText::FromString(TEXT("HitRate"))).FillWidth(0.06f)
+                                    .OnSort(this, &SPCGProfilerPanel::OnColumnSort)
+                                    .SortMode(TAttribute<EColumnSortMode::Type>::CreateLambda([this] { return GetColumnSortMode(TEXT("HitRate")); }))
                                 )
                             ]
                         ]
@@ -384,13 +525,123 @@ void SPCGProfilerPanel::RefreshData(bool bForce)
     }
 
     AllEvents = Subsystem->GetNodeEvents();
+    int32 ExplicitRuntimeModeEvents = 0;
+    int32 ExplicitEditorModeEvents = 0;
+    int32 MissingRequiredEventCount = 0;
+    int32 MissingRequiredFieldTotal = 0;
+    for (const FPCGProfilerNodeEvent& Event : AllEvents)
+    {
+        const FString MissingTag = TEXT("missing_required=");
+        const int32 MissingIndex = Event.ThreadSource.Find(MissingTag, ESearchCase::IgnoreCase);
+        if (MissingIndex != INDEX_NONE)
+        {
+            const int32 ValueStart = MissingIndex + MissingTag.Len();
+            int32 ValueEnd = ValueStart;
+            while (ValueEnd < Event.ThreadSource.Len() && FChar::IsDigit(Event.ThreadSource[ValueEnd]))
+            {
+                ++ValueEnd;
+            }
+            if (ValueEnd > ValueStart)
+            {
+                const int32 MissingFields = FCString::Atoi(*Event.ThreadSource.Mid(ValueStart, ValueEnd - ValueStart));
+                if (MissingFields > 0)
+                {
+                    ++MissingRequiredEventCount;
+                    MissingRequiredFieldTotal += MissingFields;
+                }
+            }
+        }
 
-    StatusText = FString::Printf(TEXT("Run=%s | Idle=%s | ActivePCGComponents=%d | Nodes=%d | Events=%d"),
+        if (Event.RunMode.IsEmpty())
+        {
+            continue;
+        }
+        if (PCGProfilerPanelInternal::IsRuntimeRunMode(Event.RunMode))
+        {
+            ++ExplicitRuntimeModeEvents;
+        }
+        else
+        {
+            ++ExplicitEditorModeEvents;
+        }
+    }
+    if (ExplicitRuntimeModeEvents > 0 || ExplicitEditorModeEvents > 0)
+    {
+        EventRunModeFallback = (ExplicitRuntimeModeEvents >= ExplicitEditorModeEvents) ? TEXT("runtime") : TEXT("editor");
+    }
+    else
+    {
+        EventRunModeFallback = PCGProfilerPanelInternal::ResolveCurrentRunModeFallback();
+    }
+
+    TMap<FString, int32> NodeEditorHits;
+    TMap<FString, int32> NodeRuntimeHits;
+    TMap<FString, int32> NodeTotalEventSamples;
+    TMap<FString, int32> NodeDurationNonZeroSamples;
+    for (const FPCGProfilerNodeEvent& Event : AllEvents)
+    {
+        FPCGProfilerNodeAggregate KeyAggregate;
+        KeyAggregate.NodeId = Event.NodeId;
+        KeyAggregate.NodeName = Event.NodeTitle;
+        KeyAggregate.GraphName = Event.GraphName;
+        KeyAggregate.ExecutionPath = Event.ExecutionPath;
+        const FString Key = BuildNodeIdentity(KeyAggregate);
+        NodeTotalEventSamples.FindOrAdd(Key) += 1;
+        if (Event.InclusiveMs > 0.0)
+        {
+            NodeDurationNonZeroSamples.FindOrAdd(Key) += 1;
+        }
+        const FString EffectiveMode = PCGProfilerPanelInternal::ResolveEventRunMode(Event, EventRunModeFallback);
+        if (PCGProfilerPanelInternal::IsRuntimeRunMode(EffectiveMode))
+        {
+            NodeRuntimeHits.FindOrAdd(Key) += 1;
+        }
+        else
+        {
+            NodeEditorHits.FindOrAdd(Key) += 1;
+        }
+    }
+
+    for (const TSharedPtr<FNodeItem>& Item : AllItems)
+    {
+        if (!Item.IsValid())
+        {
+            continue;
+        }
+        const FString Key = BuildNodeIdentity(Item->Aggregate);
+        const int32 EditorHits = NodeEditorHits.FindRef(Key);
+        const int32 RuntimeHits = NodeRuntimeHits.FindRef(Key);
+        const int32 TotalSamples = NodeTotalEventSamples.FindRef(Key);
+        const int32 NonZeroSamples = NodeDurationNonZeroSamples.FindRef(Key);
+        Item->DurationNonZeroRate = TotalSamples > 0 ? (static_cast<double>(NonZeroSamples) / static_cast<double>(TotalSamples)) : 0.0;
+        if (RuntimeHits > 0 && EditorHits == 0)
+        {
+            Item->RunModeBucket = TEXT("runtime");
+        }
+        else if (EditorHits > 0 && RuntimeHits == 0)
+        {
+            Item->RunModeBucket = TEXT("editor");
+        }
+        else if (EditorHits > 0 && RuntimeHits > 0)
+        {
+            Item->RunModeBucket = TEXT("mixed");
+        }
+        else
+        {
+            Item->RunModeBucket = TEXT("unknown");
+        }
+    }
+
+    StatusText = FString::Printf(TEXT("Run=%s | ViewMode=%s | EventFallback=%s | Idle=%s | ActivePCGComponents=%d | Nodes=%d | Events=%d | MissingEvents=%d | MissingFields=%d"),
         RunName.IsEmpty() ? TEXT("<none>") : *RunName,
+        *RunModeFilter,
+        *EventRunModeFallback,
         bIdle ? TEXT("true") : TEXT("false"),
         ActiveComponents,
         AllItems.Num(),
-        AllEvents.Num());
+        AllEvents.Num(),
+        MissingRequiredEventCount,
+        MissingRequiredFieldTotal);
 
     RebuildFilteredItems();
 
@@ -434,13 +685,56 @@ void SPCGProfilerPanel::RebuildFilteredItems()
         const FPCGProfilerNodeAggregate& A = Item->Aggregate;
         const FString Haystack = (A.NodeName + TEXT(" ") + A.NodeId + TEXT(" ") + A.GraphName).ToLower();
         if (!LowerFilter.IsEmpty() && !Haystack.Contains(LowerFilter)) { continue; }
+        if (!PCGProfilerPanelInternal::MatchRunMode(Item->RunModeBucket, RunModeFilter)) { continue; }
         FilteredItems.Add(Item);
     }
 
-    FilteredItems.Sort([](const TSharedPtr<FNodeItem>& Lhs, const TSharedPtr<FNodeItem>& Rhs)
+    const FName LocalSortColumn = SortColumn;
+    const bool bDescending = (SortMode == EColumnSortMode::Descending);
+    FilteredItems.Sort([LocalSortColumn, bDescending](const TSharedPtr<FNodeItem>& Lhs, const TSharedPtr<FNodeItem>& Rhs)
     {
-        return Lhs->Aggregate.TotalMs > Rhs->Aggregate.TotalMs;
+        const double LVal = GetSortValue(Lhs, LocalSortColumn);
+        const double RVal = GetSortValue(Rhs, LocalSortColumn);
+        return bDescending ? (LVal > RVal) : (LVal < RVal);
     });
+}
+
+void SPCGProfilerPanel::OnColumnSort(EColumnSortPriority::Type SortPriority, const FName& ColumnName, EColumnSortMode::Type InSortMode)
+{
+    if (SortColumn == ColumnName)
+    {
+        SortMode = (SortMode == EColumnSortMode::Ascending) ? EColumnSortMode::Descending : EColumnSortMode::Ascending;
+    }
+    else
+    {
+        SortColumn = ColumnName;
+        SortMode = EColumnSortMode::Descending;
+    }
+    RebuildFilteredItems();
+    if (NodeListView.IsValid())
+    {
+        NodeListView->RequestListRefresh();
+    }
+}
+
+EColumnSortMode::Type SPCGProfilerPanel::GetColumnSortMode(FName ColumnName) const
+{
+    return (ColumnName == SortColumn) ? SortMode : EColumnSortMode::None;
+}
+
+double SPCGProfilerPanel::GetSortValue(const TSharedPtr<FNodeItem>& Item, const FName& ColumnName)
+{
+    const FPCGProfilerNodeAggregate& A = Item->Aggregate;
+    if (ColumnName == TEXT("Calls"))     { return static_cast<double>(A.CallCount); }
+    if (ColumnName == TEXT("TotalMs"))   { return A.TotalMs; }
+    if (ColumnName == TEXT("SelfMs"))    { return A.SelfMs; }
+    if (ColumnName == TEXT("P95Ms"))     { return A.P95Ms; }
+    if (ColumnName == TEXT("GTRatio"))   { return A.GameThreadRatio; }
+    if (ColumnName == TEXT("WkRatio"))   { return A.WorkerThreadRatio; }
+    if (ColumnName == TEXT("PtsK"))      { return static_cast<double>(A.InputPointsMax); }
+    if (ColumnName == TEXT("HitRate"))   { return A.CacheHitRate; }
+    if (ColumnName == TEXT("NonZero"))   { return Item->DurationNonZeroRate; }
+    return 0.0;
 }
 
 void SPCGProfilerPanel::RebuildDiagnostics()
@@ -454,6 +748,9 @@ void SPCGProfilerPanel::RebuildDiagnostics()
     double TotalMs = 0.0;
     double GameThreadMs = 0.0;
     double WorkerMs = 0.0;
+    double QueueWaitTotalMs = 0.0;
+    int64 TotalInputPts = 0;
+    int64 TotalOutputPts = 0;
     int32 CacheHit = 0;
     int32 CacheMiss = 0;
     int32 NoExecNodeCount = 0;
@@ -464,6 +761,9 @@ void SPCGProfilerPanel::RebuildDiagnostics()
         TotalMs += A.TotalMs;
         GameThreadMs += A.GameThreadMs;
         WorkerMs += A.WorkerThreadMs;
+        QueueWaitTotalMs += A.QueueWaitTotalMs;
+        TotalInputPts += A.InputPointsMax;
+        TotalOutputPts += A.OutputPointsMax;
         if (A.CallCount <= 0 || A.TotalMs <= KINDA_SMALL_NUMBER)
         {
             ++NoExecNodeCount;
@@ -475,10 +775,17 @@ void SPCGProfilerPanel::RebuildDiagnostics()
     const double ThreadTotal = GameThreadMs + WorkerMs;
     const double GTRatio = ThreadTotal > 0.0 ? (GameThreadMs / ThreadTotal) : 0.0;
     const double HitRate = (CacheHit + CacheMiss) > 0 ? static_cast<double>(CacheHit) / static_cast<double>(CacheHit + CacheMiss) : 0.0;
+    const double QueueWaitRatio = TotalMs > 0.0 ? (QueueWaitTotalMs / TotalMs) : 0.0;
 
     DiagnosticsText = FString::Printf(
-        TEXT("Aggregate Node Work: %.2f ms\nGT/Worker: %.2f / %.2f ms (GT %.1f%%)\nCache Hit Rate: %.1f%% (hit=%d miss=%d)\nNoExec Nodes: %d"),
-        TotalMs, GameThreadMs, WorkerMs, GTRatio * 100.0, HitRate * 100.0, CacheHit, CacheMiss, NoExecNodeCount);
+        TEXT("Aggregate Node Work: %.2f ms\nGT/Worker: %.2f / %.2f ms (GT %.1f%%)\nQueueWait Total: %.2f ms (%.1f%% of total)\nCache Hit Rate: %.1f%% (hit=%d miss=%d)\nNoExec Nodes: %d\nInputPts: %s | OutputPts: %s"),
+        TotalMs,
+        GameThreadMs, WorkerMs, GTRatio * 100.0,
+        QueueWaitTotalMs, QueueWaitRatio * 100.0,
+        HitRate * 100.0, CacheHit, CacheMiss,
+        NoExecNodeCount,
+        *PCGProfilerPanelInternal::FormatPoints(TotalInputPts),
+        *PCGProfilerPanelInternal::FormatPoints(TotalOutputPts));
 }
 
 void SPCGProfilerPanel::RebuildTimelineAndDrilldown()
@@ -515,6 +822,11 @@ void SPCGProfilerPanel::RebuildTimelineAndDrilldown()
     int32 WorkerCount = 0;
     for (const FPCGProfilerNodeEvent& E : SortedEvents)
     {
+        const FString EffectiveMode = PCGProfilerPanelInternal::ResolveEventRunMode(E, EventRunModeFallback);
+        if (!PCGProfilerPanelInternal::MatchRunMode(EffectiveMode, RunModeFilter))
+        {
+            continue;
+        }
         MaxEndMs = FMath::Max(MaxEndMs, E.FirstSeenTimeMs + FMath::Max(E.InclusiveMs, 0.0));
         if (E.ThreadGroup.Equals(TEXT("GameThread"), ESearchCase::IgnoreCase)) { ++GTCount; }
         else if (E.ThreadGroup.Equals(TEXT("Worker"), ESearchCase::IgnoreCase)) { ++WorkerCount; }
@@ -529,6 +841,11 @@ void SPCGProfilerPanel::RebuildTimelineAndDrilldown()
 
     for (const FPCGProfilerNodeEvent& E : SortedEvents)
     {
+        const FString EffectiveMode = PCGProfilerPanelInternal::ResolveEventRunMode(E, EventRunModeFallback);
+        if (!PCGProfilerPanelInternal::MatchRunMode(EffectiveMode, RunModeFilter))
+        {
+            continue;
+        }
         const int32 Index = FMath::Clamp(FMath::FloorToInt(E.FirstSeenTimeMs / FMath::Max(0.001, WindowSizeMs)), 0, WindowCount - 1);
         if (E.ThreadGroup.Equals(TEXT("GameThread"), ESearchCase::IgnoreCase)) { GTWindows[Index] += E.InclusiveMs; }
         else if (E.ThreadGroup.Equals(TEXT("Worker"), ESearchCase::IgnoreCase)) { WorkerWindows[Index] += E.InclusiveMs; }
@@ -545,6 +862,11 @@ void SPCGProfilerPanel::RebuildTimelineAndDrilldown()
     int32 PreciseStartCount = 0;
     for (const FPCGProfilerNodeEvent& E : SortedEvents)
     {
+        const FString EffectiveMode = PCGProfilerPanelInternal::ResolveEventRunMode(E, EventRunModeFallback);
+        if (!PCGProfilerPanelInternal::MatchRunMode(EffectiveMode, RunModeFilter))
+        {
+            continue;
+        }
         if (E.FirstSeenTimeSource.Contains(TEXT("timer"), ESearchCase::IgnoreCase))
         {
             ++PreciseStartCount;
@@ -570,6 +892,8 @@ void SPCGProfilerPanel::RebuildTimelineAndDrilldown()
         }
 
         if (!bMatchNode) { continue; }
+        const FString EffectiveMode = PCGProfilerPanelInternal::ResolveEventRunMode(E, EventRunModeFallback);
+        if (!PCGProfilerPanelInternal::MatchRunMode(EffectiveMode, RunModeFilter)) { continue; }
         if (!PCGProfilerPanelInternal::MatchFilter(E.ThreadGroup, EventThreadFilter)) { continue; }
         const FString CacheToken = E.bCacheHit ? TEXT("hit") : TEXT("miss");
         if (!PCGProfilerPanelInternal::MatchFilter(CacheToken, EventCacheFilter)) { continue; }
@@ -612,24 +936,50 @@ void SPCGProfilerPanel::RebuildTimelineAndDrilldown()
     const FString DataType = SelectedAggregate->DataType.IsEmpty() ? TEXT("Unknown") : SelectedAggregate->DataType;
 
     SelectionDetails = FString::Printf(
-        TEXT("Node: %s\nNodeId: %s\nGraph: %s\nDataType: %s\nState: %s\nTotal/P95: %.2f / %.2f ms\nCalls: %d\nGT%%: %.1f%%\nHitRate: %.1f%%\nExecutionPath:\n%s\n\nDrill-down filters: thread='%s' cache='%s'\nMatched events: %d/%d (hit=%d miss=%d)\nNote: event table is truncated to %d rows for responsiveness.\n\nBy thread:\n%s"),
-        *SelectedAggregate->NodeName,
-        *SelectedAggregate->NodeId,
-        *SelectedAggregate->GraphName,
+        TEXT("Node: %s\nNodeId: %s\nGraph: %s\nDataType: %s\nState: %s\n\n")
+        TEXT("--- Timing ---\n")
+        TEXT("Total: %.2f ms    Self: %.2f ms\n")
+        TEXT("Avg: %.2f ms    P50: %.2f ms    P95: %.2f ms\n")
+        TEXT("CV: %.2f    StdDev: %.2f ms\n")
+        TEXT("Execution: %.2f ms    QueueWait: %.2f ms (%.1f%% of total)\n\n")
+        TEXT("--- Threading ---\n")
+        TEXT("GT: %.2f ms (%.1f%%)    Wk: %.2f ms (%.1f%%)\n")
+        TEXT("GT Calls: %d    Wk Calls: %d\n\n")
+        TEXT("--- Cache ---\n")
+        TEXT("Hit: %d    Miss: %d    Rate: %.1f%%\n\n")
+        TEXT("--- IO & Memory ---\n")
+        TEXT("In:  %d pins  %s pts\n")
+        TEXT("Out: %d pins  %s pts\n")
+        TEXT("Est.Mem: %s\n\n")
+        TEXT("Drill-down filters: thread='%s' cache='%s'\n")
+        TEXT("Matched events: %d/%d (hit=%d miss=%d)\n")
+        TEXT("Note: event table is truncated to %d rows for responsiveness.\n\n")
+        TEXT("By thread:\n%s"),
+        // Header
+        *SelectedAggregate->NodeName, *SelectedAggregate->NodeId, *SelectedAggregate->GraphName,
         *DataType,
         (SelectedAggregate->CallCount <= 0 || SelectedAggregate->TotalMs <= KINDA_SMALL_NUMBER) ? TEXT("NoExec") : TEXT("Executed"),
-        SelectedAggregate->TotalMs,
-        SelectedAggregate->P95Ms,
-        SelectedAggregate->CallCount,
-        SelectedAggregate->GameThreadRatio * 100.0,
+        // Timing
+        SelectedAggregate->TotalMs, SelectedAggregate->SelfMs,
+        SelectedAggregate->AvgMs, SelectedAggregate->P50Ms, SelectedAggregate->P95Ms,
+        SelectedAggregate->DurationCv, SelectedAggregate->StdDevMs,
+        SelectedAggregate->ExecutionTotalMs,
+        SelectedAggregate->QueueWaitTotalMs,
+        SelectedAggregate->TotalMs > 0.0 ? (SelectedAggregate->QueueWaitTotalMs / SelectedAggregate->TotalMs * 100.0) : 0.0,
+        // Threading
+        SelectedAggregate->GameThreadMs, SelectedAggregate->GameThreadRatio * 100.0,
+        SelectedAggregate->WorkerThreadMs, SelectedAggregate->WorkerThreadRatio * 100.0,
+        SelectedAggregate->GameThreadCallCount, SelectedAggregate->WorkerThreadCallCount,
+        // Cache
+        SelectedAggregate->CacheHitCount, SelectedAggregate->CacheMissCount,
         SelectedAggregate->CacheHitRate * 100.0,
-        *SelectedAggregate->ExecutionPath,
-        *EventThreadFilter,
-        *EventCacheFilter,
-        TimelineItems.Num(),
-        TimelineTotalMatched,
-        HitCount,
-        MissCount,
+        // IO & Memory
+        SelectedAggregate->InputCountMax, *PCGProfilerPanelInternal::FormatPoints(SelectedAggregate->InputPointsMax),
+        SelectedAggregate->OutputCountMax, *PCGProfilerPanelInternal::FormatPoints(SelectedAggregate->OutputPointsMax),
+        *PCGProfilerPanelInternal::FormatBytes((SelectedAggregate->InputPointsMax + SelectedAggregate->OutputPointsMax) * 160),
+        // Filters / counts
+        *EventThreadFilter, *EventCacheFilter,
+        TimelineItems.Num(), TimelineTotalMatched, HitCount, MissCount,
         MaxRows,
         ThreadLines.IsEmpty() ? TEXT("  <none>\n") : *ThreadLines);
 }
@@ -818,6 +1168,35 @@ FReply SPCGProfilerPanel::OnRefreshClicked()
     return FReply::Handled();
 }
 
+FReply SPCGProfilerPanel::OnCycleRunModeFilterClicked()
+{
+    if (RunModeFilter.Equals(TEXT("all"), ESearchCase::IgnoreCase))
+    {
+        RunModeFilter = TEXT("editor");
+    }
+    else if (RunModeFilter.Equals(TEXT("editor"), ESearchCase::IgnoreCase))
+    {
+        RunModeFilter = TEXT("runtime");
+    }
+    else
+    {
+        RunModeFilter = TEXT("all");
+    }
+
+    RebuildFilteredItems();
+    RebuildTimelineAndDrilldown();
+    if (NodeListView.IsValid())
+    {
+        NodeListView->RequestListRefresh();
+    }
+    if (EventListView.IsValid())
+    {
+        EventListView->RequestListRefresh();
+    }
+    StatusText = FString::Printf(TEXT("%s | Mode switched to %s"), *StatusText, *RunModeFilter);
+    return FReply::Handled();
+}
+
 FReply SPCGProfilerPanel::OnToggleAutoHtmlClicked()
 {
     bAutoGenerateHtml = !bAutoGenerateHtml;
@@ -828,11 +1207,23 @@ FReply SPCGProfilerPanel::OnToggleAutoHtmlClicked()
 FReply SPCGProfilerPanel::OnOpenDashboardClicked()
 {
     FString HtmlPath;
-    if (!LastGeneratedDashboardHtml.IsEmpty() && FPaths::FileExists(LastGeneratedDashboardHtml))
+    FString LatestJsonPath;
+    if (TryFindLatestJsonSince(FDateTime::MinValue(), LatestJsonPath))
+    {
+        const FString LatestJsonStem = FPaths::GetBaseFilename(LatestJsonPath);
+        const FString ExpectedLatestHtml = FPaths::ConvertRelativePathToFull(
+            FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Profiling/PCG/Visualization"), LatestJsonStem, TEXT("dashboard.html")));
+        if (FPaths::FileExists(ExpectedLatestHtml))
+        {
+            HtmlPath = ExpectedLatestHtml;
+        }
+    }
+
+    if (HtmlPath.IsEmpty() && !LastGeneratedDashboardHtml.IsEmpty() && FPaths::FileExists(LastGeneratedDashboardHtml))
     {
         HtmlPath = LastGeneratedDashboardHtml;
     }
-    else if (!FindLatestDashboardHtml(HtmlPath))
+    else if (HtmlPath.IsEmpty() && !FindLatestDashboardHtml(HtmlPath))
     {
         StatusText = FString::Printf(TEXT("%s | Dashboard not found."), *StatusText);
         return FReply::Handled();
@@ -942,14 +1333,29 @@ bool SPCGProfilerPanel::TryFindLatestJsonSince(const FDateTime& SinceUtc, FStrin
 
 bool SPCGProfilerPanel::TriggerDashboardGeneration(const FString& InputJsonPathAbs)
 {
-    FString ScriptPath = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("PCGProfiler/Scripts/Generate-PCGProfilerDashboard.ps1")));
-    if (!FPaths::FileExists(ScriptPath))
+    // Resolve script path via IPluginManager first (works regardless of install location),
+    // fall back to ProjectPluginsDir / EnginePluginsDir for non-standard setups.
+    FString ScriptPath;
+    if (const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("PCGProfiler")))
     {
-        ScriptPath = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::EnginePluginsDir(), TEXT("PCGProfiler/Scripts/Generate-PCGProfilerDashboard.ps1")));
+        ScriptPath = FPaths::ConvertRelativePathToFull(
+            FPaths::Combine(Plugin->GetBaseDir(), TEXT("Scripts/Generate-PCGProfilerDashboard.ps1")));
+    }
+    if (ScriptPath.IsEmpty() || !FPaths::FileExists(ScriptPath))
+    {
+        ScriptPath = FPaths::ConvertRelativePathToFull(
+            FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("PCGProfiler/Scripts/Generate-PCGProfilerDashboard.ps1")));
     }
     if (!FPaths::FileExists(ScriptPath))
     {
-        StatusText = FString::Printf(TEXT("%s | Auto HTML failed: dashboard script not found."), *StatusText);
+        ScriptPath = FPaths::ConvertRelativePathToFull(
+            FPaths::Combine(FPaths::EnginePluginsDir(), TEXT("PCGProfiler/Scripts/Generate-PCGProfilerDashboard.ps1")));
+    }
+    if (!FPaths::FileExists(ScriptPath))
+    {
+        StatusText = FString::Printf(TEXT("%s | Auto HTML failed: dashboard script not found at %s"),
+            *StatusText, *ScriptPath);
+        UE_LOG(LogTemp, Error, TEXT("PCGProfiler AutoHTML failed: dashboard script not found at %s"), *ScriptPath);
         return false;
     }
 
@@ -959,7 +1365,7 @@ bool SPCGProfilerPanel::TriggerDashboardGeneration(const FString& InputJsonPathA
     const FString OutputDir = FPaths::ConvertRelativePathToFull(
         FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Profiling/PCG/Visualization"), JsonStem));
     IFileManager::Get().MakeDirectory(*OutputDir, true);
-    FString Params = FString::Printf(
+    const FString Params = FString::Printf(
         TEXT("-NoProfile -ExecutionPolicy Bypass -File \"%s\" -InputJson \"%s\" -OutputDir \"%s\" -ProjectRoot \"%s\" -EngineRoot \"%s\" -SkipScreenshot"),
         *ScriptPath,
         *InputJsonPathAbs,
@@ -967,29 +1373,47 @@ bool SPCGProfilerPanel::TriggerDashboardGeneration(const FString& InputJsonPathA
         *ProjectRoot,
         *EngineRoot);
 
-    uint32 ProcId = 0;
-    FProcHandle Handle = FPlatformProcess::CreateProc(
+    const FString ExpectedHtmlPath = FPaths::Combine(OutputDir, TEXT("dashboard.html"));
+
+    int32 ReturnCode = -1;
+    FString StdOut;
+    FString StdErr;
+    const bool bExecOk = FPlatformProcess::ExecProcess(
         TEXT("powershell.exe"),
         *Params,
-        true,
-        false,
-        false,
-        &ProcId,
-        0,
-        nullptr,
-        nullptr);
+        &ReturnCode,
+        &StdOut,
+        &StdErr);
 
-    if (!Handle.IsValid())
+    if (!bExecOk)
     {
-        StatusText = FString::Printf(TEXT("%s | Auto HTML failed: cannot launch powershell."), *StatusText);
+        StatusText = FString::Printf(TEXT("%s | Auto HTML failed: cannot execute powershell."), *StatusText);
+        UE_LOG(LogTemp, Error, TEXT("PCGProfiler AutoHTML failed: cannot execute powershell. Script=%s Json=%s"), *ScriptPath, *InputJsonPathAbs);
         return false;
     }
 
-    FPlatformProcess::CloseProc(Handle);
+    if (ReturnCode != 0)
+    {
+        const FString ErrSnippet = !StdErr.IsEmpty() ? StdErr.Left(300) : StdOut.Left(300);
+        StatusText = FString::Printf(TEXT("%s | Auto HTML failed (code=%d): %s"), *StatusText, ReturnCode, *ErrSnippet);
+        UE_LOG(LogTemp, Error, TEXT("PCGProfiler AutoHTML failed: code=%d Script=%s Json=%s Error=%s"), ReturnCode, *ScriptPath, *InputJsonPathAbs, *ErrSnippet);
+        return false;
+    }
+
+    if (FPaths::FileExists(ExpectedHtmlPath))
+    {
+        LastGeneratedDashboardHtml = ExpectedHtmlPath;
+        StatusText = FString::Printf(TEXT("%s | Auto HTML ready: %s"), *StatusText, *ExpectedHtmlPath);
+        UE_LOG(LogTemp, Display, TEXT("PCGProfiler AutoHTML success: %s"), *ExpectedHtmlPath);
+        return true;
+    }
+
     bHtmlGenerationInProgress = true;
     HtmlGenerationStartUtc = FDateTime::UtcNow();
     HtmlSourceJsonPath = InputJsonPathAbs;
-    StatusText = FString::Printf(TEXT("%s | Auto HTML launched for %s, waiting for dashboard..."), *StatusText, *FPaths::GetCleanFilename(InputJsonPathAbs));
+    StatusText = FString::Printf(TEXT("%s | Auto HTML launched for %s, waiting for dashboard..."),
+        *StatusText, *FPaths::GetCleanFilename(InputJsonPathAbs));
+    UE_LOG(LogTemp, Display, TEXT("PCGProfiler AutoHTML launched: json=%s output_dir=%s"), *InputJsonPathAbs, *OutputDir);
     return true;
 }
 
@@ -1040,6 +1464,7 @@ void SPCGProfilerPanel::TickDashboardGenerationState()
             bHtmlGenerationInProgress = false;
             LastGeneratedDashboardHtml = HtmlPath;
             StatusText = FString::Printf(TEXT("%s | Auto HTML ready: %s"), *StatusText, *HtmlPath);
+            UE_LOG(LogTemp, Display, TEXT("PCGProfiler AutoHTML success: %s"), *HtmlPath);
             return;
         }
     }
@@ -1049,6 +1474,7 @@ void SPCGProfilerPanel::TickDashboardGenerationState()
     {
         bHtmlGenerationInProgress = false;
         StatusText = FString::Printf(TEXT("%s | Auto HTML timeout for %s"), *StatusText, *FPaths::GetCleanFilename(HtmlSourceJsonPath));
+        UE_LOG(LogTemp, Error, TEXT("PCGProfiler AutoHTML timeout: source_json=%s"), *HtmlSourceJsonPath);
     }
 }
 
@@ -1103,6 +1529,24 @@ void SPCGProfilerPanel::TryKickoffAutoArtifacts(UPCGProfilerSubsystem* Subsystem
         return;
     }
 
+    if (bAutoGenerateHtml
+        && !bHtmlGenerationInProgress
+        && PendingHtmlJsonQueue.IsEmpty())
+    {
+        FString LatestJsonPath;
+        const FDateTime SinceUtc = AutoArtifactStartUtc - FTimespan::FromSeconds(5.0);
+        if (TryFindLatestJsonSince(SinceUtc, LatestJsonPath))
+        {
+            const FString LatestJsonAbs = FPaths::ConvertRelativePathToFull(LatestJsonPath);
+            if (!QueuedHtmlJsons.Contains(LatestJsonAbs))
+            {
+                PendingHtmlJsonQueue.Add(LatestJsonAbs);
+                QueuedHtmlJsons.Add(LatestJsonAbs);
+                BatchJsonPaths.Add(LatestJsonAbs);
+            }
+        }
+    }
+
     if (bAutoGenerateHtml && !bHtmlGenerationInProgress && PendingHtmlJsonQueue.Num() > 0)
     {
         const FString NextJson = PendingHtmlJsonQueue[0];
@@ -1111,7 +1555,8 @@ void SPCGProfilerPanel::TryKickoffAutoArtifacts(UPCGProfilerSubsystem* Subsystem
     }
 
     if (!bHtmlGenerationInProgress
-        && PendingHtmlJsonQueue.IsEmpty())
+        && PendingHtmlJsonQueue.IsEmpty()
+        && BatchJsonPaths.Num() > 0)  // Only shut down after at least one JSON was found
     {
         if (bBatchSummaryPending && !bBatchSummaryLaunched && BatchJsonPaths.Num() > 1)
         {
@@ -1129,14 +1574,26 @@ bool SPCGProfilerPanel::TriggerBatchSummaryGeneration(const TArray<FString>& Inp
         return false;
     }
 
-    FString ScriptPath = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("PCGProfiler/Scripts/Generate-PCGProfilerBatchSummary.ps1")));
-    if (!FPaths::FileExists(ScriptPath))
+    FString ScriptPath;
+    if (const TSharedPtr<IPlugin> Plugin = IPluginManager::Get().FindPlugin(TEXT("PCGProfiler")))
     {
-        ScriptPath = FPaths::ConvertRelativePathToFull(FPaths::Combine(FPaths::EnginePluginsDir(), TEXT("PCGProfiler/Scripts/Generate-PCGProfilerBatchSummary.ps1")));
+        ScriptPath = FPaths::ConvertRelativePathToFull(
+            FPaths::Combine(Plugin->GetBaseDir(), TEXT("Scripts/Generate-PCGProfilerBatchSummary.ps1")));
+    }
+    if (ScriptPath.IsEmpty() || !FPaths::FileExists(ScriptPath))
+    {
+        ScriptPath = FPaths::ConvertRelativePathToFull(
+            FPaths::Combine(FPaths::ProjectPluginsDir(), TEXT("PCGProfiler/Scripts/Generate-PCGProfilerBatchSummary.ps1")));
     }
     if (!FPaths::FileExists(ScriptPath))
     {
-        StatusText = FString::Printf(TEXT("%s | Batch summary skipped: script not found."), *StatusText);
+        ScriptPath = FPaths::ConvertRelativePathToFull(
+            FPaths::Combine(FPaths::EnginePluginsDir(), TEXT("PCGProfiler/Scripts/Generate-PCGProfilerBatchSummary.ps1")));
+    }
+    if (!FPaths::FileExists(ScriptPath))
+    {
+        StatusText = FString::Printf(TEXT("%s | Batch summary skipped: script not found at %s"),
+            *StatusText, *ScriptPath);
         return false;
     }
 
@@ -1150,32 +1607,19 @@ bool SPCGProfilerPanel::TriggerBatchSummaryGeneration(const TArray<FString>& Inp
     FString JsonList;
     for (const FString& JsonPath : InputJsonPathsAbs)
     {
-        if (!JsonList.IsEmpty())
-        {
-            JsonList += TEXT("|");
-        }
+        if (!JsonList.IsEmpty()) { JsonList += TEXT("|"); }
         JsonList += JsonPath;
     }
 
     const FString Params = FString::Printf(
         TEXT("-NoProfile -ExecutionPolicy Bypass -File \"%s\" -InputJsonList \"%s\" -OutputDir \"%s\" -ProjectRoot \"%s\" -EngineRoot \"%s\""),
-        *ScriptPath,
-        *JsonList,
-        *OutputDir,
-        *ProjectRoot,
-        *EngineRoot);
+        *ScriptPath, *JsonList, *OutputDir, *ProjectRoot, *EngineRoot);
 
     uint32 ProcId = 0;
     FProcHandle Handle = FPlatformProcess::CreateProc(
-        TEXT("powershell.exe"),
-        *Params,
-        true,
-        false,
-        false,
-        &ProcId,
-        0,
-        *EngineRoot,
-        nullptr);
+        TEXT("powershell.exe"), *Params,
+        true, false, false,
+        &ProcId, 0, nullptr, nullptr);
 
     if (!Handle.IsValid())
     {

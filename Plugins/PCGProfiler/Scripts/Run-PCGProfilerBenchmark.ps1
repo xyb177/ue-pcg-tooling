@@ -1,6 +1,6 @@
-param(
-    [string]$EngineRoot = "F:\UnrealEngine-5.7.3-release",
-    [string]$ProjectPath = "F:\Unreal Projects\ElectricDreamsEnv\ElectricDreamsEnv.uproject",
+﻿param(
+    [string]$EngineRoot = "",
+    [string]$ProjectPath = "",
     [string[]]$Maps = @(
         "/Game/Levels/PCG/ElectricDreams_PCG",
         "/Game/Levels/PCG/ElectricDreams_PCGCloseRange"
@@ -15,7 +15,12 @@ param(
     [switch]$CleanupResidualEditorCmd = $true
 )
 
+Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "PCGProfiler.ScriptCommon.ps1")
+$EngineRoot = Resolve-PCGProfilerEngineRoot -PreferredEngineRoot $EngineRoot
+$ProjectPath = Resolve-PCGProfilerProjectPath -PreferredProjectPath $ProjectPath
 
 function Get-Stats([double[]]$Values) {
     if (-not $Values -or $Values.Count -eq 0) {
@@ -41,18 +46,19 @@ function Get-Stats([double[]]$Values) {
 }
 
 function Get-FailureCategory([string]$Message) {
-    $m = ($Message ?? "").ToLowerInvariant()
-    if ($m.Contains("超时") -or $m.Contains("timeout")) { return "timeout" }
-    if ($m.Contains("退出码") -or $m.Contains("exitcode")) { return "command_failed" }
-    if ($m.Contains("未检测到本轮新导出的") -or $m.Contains("no new") -or $m.Contains("没有找到包含")) { return "no_export_file" }
-    if ($m.Contains("convertfrom-json") -or $m.Contains("json") -or $m.Contains("解析")) { return "json_parse_failed" }
+    $m = ""
+    if ($null -ne $Message) { $m = [string]$Message }
+    $m = $m.ToLowerInvariant()
+
+    if ($m.Contains("timeout")) { return "timeout" }
+    if ($m.Contains("exitcode")) { return "command_failed" }
+    if ($m.Contains("no new") -or $m.Contains("pcgprofiler json")) { return "no_export_file" }
+    if ($m.Contains("convertfrom-json") -or $m.Contains("json")) { return "json_parse_failed" }
     return "unknown"
 }
 
 function Cleanup-ResidualEditorCmd {
-    param(
-        [string]$ProjectPath
-    )
+    param([string]$ProjectPath)
 
     $killed = 0
     $projectLower = $ProjectPath.ToLowerInvariant()
@@ -92,7 +98,6 @@ function Invoke-OneRun {
     $startPy = Join-Path $EngineRoot "Plugins\PCGProfiler\Scripts\pcg_start_run.py"
     $waitPy = Join-Path $EngineRoot "Plugins\PCGProfiler\Scripts\pcg_wait_until_idle.py"
     $finishPy = Join-Path $EngineRoot "Plugins\PCGProfiler\Scripts\pcg_finish_export.py"
-
     $execCmds = "py `"$startPy`",py `"$waitPy`",py `"$finishPy`",Quit"
 
     $args = @(
@@ -138,24 +143,22 @@ function Invoke-OneRun {
 
         if ((Get-Date) -ge $deadline) {
             try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
-            throw "单轮超时（>$TimeoutMinutes 分钟），已终止进程 PID=$($proc.Id)"
+            throw "Single run timeout (${TimeoutMinutes} min), process terminated. PID=$($proc.Id)"
         }
     }
 
     if (-not $exportedPathFromLog -and $proc.ExitCode -ne 0) {
-        throw "UnrealEditor-Cmd 退出码异常：$($proc.ExitCode)"
+        throw "UnrealEditor-Cmd exited with non-zero code: $($proc.ExitCode)"
     }
 
-    if ($exportedPathFromLog) {
-        return $exportedPathFromLog
-    }
+    if ($exportedPathFromLog) { return $exportedPathFromLog }
 
     $after = Get-ChildItem $profileDir -Recurse -Filter "*.json" -ErrorAction SilentlyContinue |
         Where-Object { -not $before.ContainsKey($_.FullName) } |
         Sort-Object LastWriteTime -Descending
 
     if (-not $after -or $after.Count -eq 0) {
-        throw "未检测到本轮新导出的 PCGProfiler JSON"
+        throw "No new PCGProfiler JSON generated for this run."
     }
 
     foreach ($candidate in $after) {
@@ -168,7 +171,7 @@ function Invoke-OneRun {
         catch {}
     }
 
-    throw "检测到新 JSON，但没有找到包含 run_duration_ms/thread_load 的 PCGProfiler 导出结果"
+    throw "New JSON found but missing required fields: run_duration_ms/thread_load."
 }
 
 $effectiveIterations = $IterationsPerMap
@@ -191,8 +194,8 @@ switch ($Preset) {
     default {}
 }
 
-$editorCmd = Join-Path $EngineRoot "Engine\Binaries\Win64\UnrealEditor-Cmd.exe"
-$pluginPath = Join-Path $EngineRoot "Plugins\PCGProfiler\PCGProfiler.uplugin"
+$editorCmd = Get-PCGProfilerEditorCmdPath -EngineRoot $EngineRoot
+$pluginPath = Get-PCGProfilerPluginUpluginPath -EngineRoot $EngineRoot
 $projectDir = Split-Path -Parent $ProjectPath
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $totalRuns = $Maps.Count * $effectiveIterations
@@ -208,7 +211,7 @@ New-Item -ItemType Directory -Force -Path $projectBenchmarkDir | Out-Null
 if ($CleanupResidualEditorCmd) {
     $killedCount = Cleanup-ResidualEditorCmd -ProjectPath $ProjectPath
     if ($killedCount -gt 0) {
-        Write-Host "已清理残留 UnrealEditor-Cmd 进程：$killedCount"
+        Write-Host "Cleaned residual UnrealEditor-Cmd processes: $killedCount"
     }
 }
 
@@ -221,8 +224,8 @@ foreach ($map in $Maps) {
     for ($i = 1; $i -le $effectiveIterations; $i++) {
         $currentRun++
         $progress = [int](($currentRun / [double]$totalRuns) * 100)
-        Write-Progress -Id 1 -Activity "PCG Profiler 基准测试" -Status "地图 $map（第 $i/$effectiveIterations 轮，总进度 $currentRun/$totalRuns）" -PercentComplete $progress
-        Write-Host "[$currentRun/$totalRuns] 开始：$map (第 $i 轮)"
+        Write-Progress -Id 1 -Activity "PCG Profiler Benchmark" -Status "Map $map (iter $i/$effectiveIterations, total $currentRun/$totalRuns)" -PercentComplete $progress
+        Write-Host "[$currentRun/$totalRuns] Start: $map (iter $i)"
 
         $logAbs = Join-Path $projectBenchmarkDir ("run_{0}_{1}.log" -f $mapSafe, $i)
         $attempt = 0
@@ -232,7 +235,7 @@ foreach ($map in $Maps) {
             try {
                 $attempt++
                 if ($attempt -gt 1) {
-                    Write-Host "  重试第 $attempt 次..."
+                    Write-Host "  Retry attempt $attempt..."
                 }
 
                 $jsonPath = Invoke-OneRun -EngineRoot $EngineRoot -EditorCmd $editorCmd -ProjectPath $ProjectPath -Map $map -PluginPath $pluginPath -UseNullRHI:$effectiveUseNullRHI -LogPath $logAbs -TimeoutMinutes $effectiveTimeout
@@ -240,12 +243,8 @@ foreach ($map in $Maps) {
                 $threadLoad = $json.thread_load
                 $topNodeP95Ms = 0.0
                 if ($json.nodes) {
-                    $p95Candidates = @($json.nodes | ForEach-Object {
-                        if ($null -ne $_.p95_ms) { [double]$_.p95_ms } else { 0.0 }
-                    })
-                    if ($p95Candidates.Count -gt 0) {
-                        $topNodeP95Ms = ($p95Candidates | Measure-Object -Maximum).Maximum
-                    }
+                    $p95Candidates = @($json.nodes | ForEach-Object { if ($null -ne $_.p95_ms) { [double]$_.p95_ms } else { 0.0 } })
+                    if ($p95Candidates.Count -gt 0) { $topNodeP95Ms = ($p95Candidates | Measure-Object -Maximum).Maximum }
                 }
 
                 $results += [pscustomobject]@{
@@ -260,12 +259,11 @@ foreach ($map in $Maps) {
                     top_node_p95_ms = [double]$topNodeP95Ms
                     attempt = $attempt
                 }
-                Write-Host "  完成：$jsonPath"
             }
             catch {
                 $msg = $_.Exception.Message
                 if ($attempt -gt $effectiveRetry) {
-                    Write-Host "  失败：$msg"
+                    Write-Host "  Failed: $msg"
                     $failures += [pscustomobject]@{
                         map = $map
                         iteration = $i
@@ -278,7 +276,7 @@ foreach ($map in $Maps) {
         }
     }
 }
-Write-Progress -Id 1 -Activity "PCG Profiler 基准测试" -Completed
+Write-Progress -Id 1 -Activity "PCG Profiler Benchmark" -Completed
 
 $summary = @()
 foreach ($group in ($results | Group-Object map)) {
@@ -319,189 +317,64 @@ foreach ($group in ($results | Group-Object map)) {
     }
 }
 
-$topVolatileNodes = @()
-foreach ($map in $Maps) {
-    $mapRuns = @($results | Where-Object { $_.map -eq $map })
-    if ($mapRuns.Count -eq 0) { continue }
-    $bucket = @{}
-    foreach ($r in $mapRuns) {
-        try {
-            $obj = Get-Content -Path $r.json_path -Raw | ConvertFrom-Json
-            foreach ($n in ($obj.nodes ?? @())) {
-                $key = "$($map)|$($n.node_id)|$($n.node_name)"
-                if (-not $bucket.ContainsKey($key)) {
-                    $bucket[$key] = [System.Collections.Generic.List[double]]::new()
-                }
-                $bucket[$key].Add([double]($n.total_ms ?? 0))
-            }
-        }
-        catch {}
-    }
-    foreach ($k in $bucket.Keys) {
-        $vals = @($bucket[$k].ToArray())
-        if ($vals.Count -lt 2) { continue }
-        $s = Get-Stats $vals
-        $parts = $k.Split("|", 3)
-        $topVolatileNodes += [pscustomobject]@{
-            map = $parts[0]
-            node_id = $parts[1]
-            node_name = $parts[2]
-            total_ms_mean = [Math]::Round($s.mean, 3)
-            total_ms_cv = [Math]::Round($s.cv, 4)
-            sample_count = $vals.Count
-        }
-    }
-}
-$topVolatileNodes = @($topVolatileNodes | Sort-Object total_ms_cv -Descending | Select-Object -First 20)
-
-$criticalPathVolatility = @()
-foreach ($map in $Maps) {
-    $cpTotals = [System.Collections.Generic.List[double]]::new()
-    foreach ($r in @($results | Where-Object { $_.map -eq $map })) {
-        try {
-            $obj = Get-Content -Path $r.json_path -Raw | ConvertFrom-Json
-            $sum = 0.0
-            foreach ($cp in ($obj.critical_path ?? @())) {
-                $sum += [double]($cp.inclusive_ms ?? 0)
-            }
-            $cpTotals.Add($sum)
-        }
-        catch {}
-    }
-    if ($cpTotals.Count -gt 0) {
-        $s = Get-Stats @($cpTotals.ToArray())
-        $criticalPathVolatility += [pscustomobject]@{
-            map = $map
-            critical_path_total_mean_ms = [Math]::Round($s.mean, 3)
-            critical_path_total_cv = [Math]::Round($s.cv, 4)
-            sample_count = $cpTotals.Count
-        }
-    }
-}
-
-$summaryPath = Join-Path $reportDir ("基准结果汇总_{0}.json" -f $timestamp)
-[pscustomobject]@{
+$payload = [pscustomobject]@{
     generated_at = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
     project = $ProjectPath
     maps = $Maps
-    iterations_per_map = $effectiveIterations
-    use_null_rhi = [bool]$effectiveUseNullRHI
-    timeout_per_run_minutes = $effectiveTimeout
-    retry_count = $effectiveRetry
     preset = $Preset
-    raw_results = $results
+    iterations_per_map = $effectiveIterations
+    timeout_minutes = $effectiveTimeout
+    retry_count = $effectiveRetry
+    null_rhi = $effectiveUseNullRHI
+    results = $results
     failures = $failures
-    top_volatile_nodes = $topVolatileNodes
-    critical_path_volatility = $criticalPathVolatility
     summary = $summary
-} | ConvertTo-Json -Depth 10 | Set-Content -Path $summaryPath -Encoding UTF8
+    baseline_compare = $null
+}
 
-$reportPath = Join-Path $reportDir ("大规模真实关卡_统计稳定性性能回归报告_{0}.md" -f $timestamp)
+if ($BaselineSummary -and (Test-Path -LiteralPath $BaselineSummary)) {
+    try {
+        $baseline = Get-Content -Path $BaselineSummary -Raw | ConvertFrom-Json
+        $comparisons = @()
+        foreach ($s in $summary) {
+            $base = @($baseline.summary | Where-Object { $_.map -eq $s.map }) | Select-Object -First 1
+            if ($null -eq $base) { continue }
+            $comparisons += [pscustomobject]@{
+                map = $s.map
+                duration_regression_pct = if ([double]$base.duration_mean_ms -gt 0) { [Math]::Round((([double]$s.duration_mean_ms - [double]$base.duration_mean_ms) / [double]$base.duration_mean_ms) * 100.0, 2) } else { 0 }
+                top_node_p95_regression_pct = if ([double]$base.top_node_p95_mean_ms -gt 0) { [Math]::Round((([double]$s.top_node_p95_mean_ms - [double]$base.top_node_p95_mean_ms) / [double]$base.top_node_p95_mean_ms) * 100.0, 2) } else { 0 }
+            }
+        }
+        $payload.baseline_compare = $comparisons
+    }
+    catch {
+        Write-Warning "Failed to parse baseline summary: $BaselineSummary"
+    }
+}
+
+$jsonOut = Join-Path $reportDir ("pcg_benchmark_summary_{0}.json" -f $timestamp)
+$mdOut = Join-Path $reportDir ("pcg_benchmark_summary_{0}.md" -f $timestamp)
+
+$payload | ConvertTo-Json -Depth 12 | Set-Content -Path $jsonOut -Encoding UTF8
 
 $lines = @()
-$lines += "# 大规模真实关卡统计稳定性/性能回归报告"
+$lines += "# PCG Profiler Benchmark"
 $lines += ""
-$lines += "- 生成时间：$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-$lines += "- 项目：$ProjectPath"
-$lines += "- 地图数量：$($Maps.Count)"
-$lines += "- 配置模板：$Preset"
-$lines += "- 每图轮次：$effectiveIterations"
-$lines += "- 执行模式：$(if($effectiveUseNullRHI){'NullRHI'}else{'Render'})"
-$lines += "- 单轮超时：$effectiveTimeout 分钟"
-$lines += "- 重试次数：$effectiveRetry"
-$lines += "- 原始汇总：`$summaryPath"
+$lines += "- Generated: $((Get-Date).ToString('yyyy-MM-dd HH:mm:ss'))"
+$lines += "- Project: $ProjectPath"
+$lines += "- Preset: $Preset"
+$lines += "- Iterations/Map: $effectiveIterations"
 $lines += ""
-$lines += "## 结果总览"
-$lines += ""
-$lines += "| 地图 | 样本数 | Duration Mean(ms) | Duration P95(ms) | Duration CV | GT Mean(ms) | Worker Mean(ms) | TopNodeP95 Mean(ms) | 并行效率均值 | 稳定性结论 |"
-$lines += "|---|---:|---:|---:|---:|---:|---:|---:|---:|---|"
-
+$lines += "| Map | Samples | Valid Node Samples | Duration Mean(ms) | Duration CV | GT CV | Worker CV | TopNodeP95 CV | Stable |"
+$lines += "|---|---:|---:|---:|---:|---:|---:|---:|---|"
 foreach ($s in $summary) {
-    $resultText = if ($s.stable_overall) { "通过" } else { "未通过" }
-    if (-not $s.has_valid_node_data) { $resultText = "无效样本(无节点数据)" }
-    $lines += "| $($s.map) | $($s.sample_count) | $($s.duration_mean_ms) | $($s.duration_p95_ms) | $($s.duration_cv) | $($s.gt_mean_ms) | $($s.worker_mean_ms) | $($s.top_node_p95_mean_ms) | $($s.parallel_efficiency_mean) | $resultText |"
+    $lines += "| $($s.map) | $($s.sample_count) | $($s.valid_node_samples) | $($s.duration_mean_ms) | $($s.duration_cv) | $($s.gt_cv) | $($s.worker_cv) | $($s.top_node_p95_cv) | $($s.stable_overall) |"
 }
-
 $lines += ""
-$lines += "## 失败样本"
-if ($failures.Count -eq 0) {
-    $lines += ""
-    $lines += "无。"
-} else {
-    $lines += ""
-    foreach ($f in $failures) {
-        $lines += "- 地图：$($f.map) 轮次：$($f.iteration) 分类：$($f.category) 错误：$($f.error) 日志：$($f.log)"
-    }
-}
+$lines += "Failures: $($failures.Count)"
+Set-Content -Path $mdOut -Value ($lines -join "`r`n") -Encoding UTF8
 
-$lines += ""
-$lines += "## Top 波动节点（按 total_ms CV）"
-if ($topVolatileNodes.Count -eq 0) {
-    $lines += ""
-    $lines += "无（样本不足或节点无可比数据）。"
-} else {
-    $lines += ""
-    $lines += "| Map | NodeId | NodeName | Mean(ms) | CV | Samples |"
-    $lines += "|---|---|---|---:|---:|---:|"
-    foreach ($n in $topVolatileNodes) {
-        $lines += "| $($n.map) | $($n.node_id) | $($n.node_name) | $($n.total_ms_mean) | $($n.total_ms_cv) | $($n.sample_count) |"
-    }
-}
-
-$lines += ""
-$lines += "## 关键路径波动摘要"
-if ($criticalPathVolatility.Count -eq 0) {
-    $lines += ""
-    $lines += "无（样本不足或critical_path缺失）。"
-} else {
-    $lines += ""
-    $lines += "| Map | CriticalPath Mean(ms) | CriticalPath CV | Samples |"
-    $lines += "|---|---:|---:|---:|"
-    foreach ($cpv in $criticalPathVolatility) {
-        $lines += "| $($cpv.map) | $($cpv.critical_path_total_mean_ms) | $($cpv.critical_path_total_cv) | $($cpv.sample_count) |"
-    }
-}
-
-$lines += ""
-$lines += "## 判定阈值"
-$lines += ""
-$lines += "- Duration 稳定：CV <= 0.20"
-$lines += "- GT 稳定：CV <= 0.25"
-$lines += "- Worker 稳定：CV <= 0.25"
-$lines += "- TopNodeP95 稳定：CV <= 0.30"
-
-$regressionMd = $null
-$regressionJson = $null
-if ($BaselineSummary -and (Test-Path -LiteralPath $BaselineSummary)) {
-    $compareScript = Join-Path $EngineRoot "Plugins\PCGProfiler\Scripts\Compare-PCGProfilerBaseline.ps1"
-    if (Test-Path -LiteralPath $compareScript) {
-        try {
-            $compareOut = & powershell -NoProfile -ExecutionPolicy Bypass -File $compareScript -BaselineSummary $BaselineSummary -CurrentSummary $summaryPath
-            foreach ($line in $compareOut) {
-                if ($line -match "^REGRESSION_REPORT_MD=(.+)$") { $regressionMd = $matches[1].Trim() }
-                if ($line -match "^REGRESSION_REPORT_JSON=(.+)$") { $regressionJson = $matches[1].Trim() }
-            }
-            if ($regressionMd) {
-                $lines += ""
-                $lines += "## 基线回归对比"
-                $lines += ""
-                $lines += "- 基线：$BaselineSummary"
-                $lines += "- 回归报告（MD）：$regressionMd"
-                if ($regressionJson) { $lines += "- 回归报告（JSON）：$regressionJson" }
-            }
-        }
-        catch {
-            $lines += ""
-            $lines += "## 基线回归对比"
-            $lines += ""
-            $lines += "- 回归脚本执行失败：$($_.Exception.Message)"
-        }
-    }
-}
-
-Set-Content -Path $reportPath -Value ($lines -join "`r`n") -Encoding UTF8
-
-Write-Output "BENCHMARK_REPORT=$reportPath"
-Write-Output "BENCHMARK_SUMMARY=$summaryPath"
-Write-Output "BENCHMARK_RESULTS=$($results.Count)"
-Write-Output "BENCHMARK_FAILURES=$($failures.Count)"
+Write-Output "SUMMARY_JSON=$jsonOut"
+Write-Output "SUMMARY_MD=$mdOut"
+Write-Output "RUNS_OK=$($results.Count)"
+Write-Output "RUNS_FAILED=$($failures.Count)"

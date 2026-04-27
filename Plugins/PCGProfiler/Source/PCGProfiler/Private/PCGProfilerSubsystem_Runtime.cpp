@@ -15,6 +15,8 @@
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "Engine/Engine.h"
+#include "Engine/Level.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 
@@ -42,11 +44,24 @@ int64 UPCGProfilerSubsystem::GetProcessMemoryBytes()
 void UPCGProfilerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
+    if (!bRuntimeWorldDelegatesBound)
+    {
+        FWorldDelegates::LevelAddedToWorld.AddUObject(this, &UPCGProfilerSubsystem::HandleLevelAddedToWorld);
+        FWorldDelegates::LevelRemovedFromWorld.AddUObject(this, &UPCGProfilerSubsystem::HandleLevelRemovedFromWorld);
+        bRuntimeWorldDelegatesBound = true;
+    }
     StartRun(TEXT("DefaultRun"));
 }
 
 void UPCGProfilerSubsystem::Deinitialize()
 {
+    ClearRuntimeLifecycleBindings();
+    if (bRuntimeWorldDelegatesBound)
+    {
+        FWorldDelegates::LevelAddedToWorld.RemoveAll(this);
+        FWorldDelegates::LevelRemovedFromWorld.RemoveAll(this);
+        bRuntimeWorldDelegatesBound = false;
+    }
     CancelOneClickProfile(TEXT("deinitialize"));
     EndRun();
     Super::Deinitialize();
@@ -55,6 +70,23 @@ void UPCGProfilerSubsystem::Deinitialize()
 void UPCGProfilerSubsystem::StartRun(const FString& InRunName)
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(PCGProfiler_StartRun);
+
+    bool bNeedsCarryoverHarvest = false;
+    {
+        FScopeLock Lock(&DataMutex);
+        bNeedsCarryoverHarvest = RunStartUtc.GetTicks() > 0 && !bRunThreadSummaryFinalized;
+    }
+
+    if (bNeedsCarryoverHarvest)
+    {
+        HarvestFromPCGExecutionInspection_NoLock();
+        PCGProfilerHarvest::SetInspectionEnabledOnAllPCGComponents(false);
+        FScopeLock Lock(&DataMutex);
+        if (RunStartUtc.GetTicks() > 0 && !bRunThreadSummaryFinalized)
+        {
+            FinalizeRunThreadSummary_NoLock();
+        }
+    }
 
     PCGProfilerHarvest::SetInspectionEnabledOnAllPCGComponents(bSamplingEnabled);
 
@@ -74,6 +106,23 @@ void UPCGProfilerSubsystem::StartRun(const FString& InRunName)
     LastProcessMemoryBytes = GetProcessMemoryBytes();
     PeakProcessMemoryBytes = LastProcessMemoryBytes;
     ResetStreamingState_NoLock();
+    RuntimeConvergedIdleTicks = 0;
+    RuntimeLastComponentCount = -1;
+    RuntimeLastComponentChangeAtSeconds = FPlatformTime::Seconds();
+    RuntimeLastLifecycleEventAtSeconds = RuntimeLastComponentChangeAtSeconds;
+    RuntimeLifecycleEventCount = 0;
+    RuntimeStreamingEventCount = 0;
+    RuntimeSpawnCountAccum = 0;
+    RuntimeDestroyCountAccum = 0;
+    RuntimeSpawnMsAccum = 0.0;
+    RuntimeDestroyMsAccum = 0.0;
+    RuntimeLastCellId.Reset();
+    RuntimeLastStreamingEvent = TEXT("none");
+    RuntimeLastGenerateReason = TEXT("unknown");
+    RuntimeLastCellLoadAtSeconds = 0.0;
+    RuntimeLastLoadedCellId.Reset();
+    RuntimeGeneratedComponentKeysSeen.Reset();
+    RefreshRuntimeLifecycleBindings();
 }
 
 void UPCGProfilerSubsystem::EndRun()
@@ -88,6 +137,200 @@ void UPCGProfilerSubsystem::EndRun()
         RunEndUtc = FDateTime::UtcNow();
     }
     FinalizeRunThreadSummary_NoLock();
+}
+
+FString UPCGProfilerSubsystem::StartRuntimeRun(const FString& OptionalRunName)
+{
+    FString RunName = OptionalRunName;
+    if (RunName.IsEmpty())
+    {
+        RunName = FString::Printf(TEXT("RuntimeRun_%s"), *FDateTime::UtcNow().ToString(TEXT("%Y%m%d_%H%M%S")));
+    }
+
+    StartRun(RunName);
+    return RunName;
+}
+
+bool UPCGProfilerSubsystem::EndRuntimeRunAndExport(const FString& OptionalAbsoluteOrRelativePath, FString& OutSavedPath)
+{
+    EndRun();
+    return ExportJsonReport(OptionalAbsoluteOrRelativePath, OutSavedPath);
+}
+
+void UPCGProfilerSubsystem::RecordRuntimeLifecycleEvent(
+    const FString& Phase,
+    const FString& GenerateReason,
+    const FString& CellId,
+    const FString& StreamingEvent,
+    int32 SpawnCount,
+    int32 DestroyCount,
+    double SpawnMs,
+    double DestroyMs)
+{
+    const PCGProfilerRuntimeSemantic::FRunContext RuntimeContext = PCGProfilerRuntimeSemantic::ResolveRunContext();
+
+    FPCGProfilerNodeEvent Event;
+    Event.NodeId = TEXT("__runtime_lifecycle__");
+    Event.NodeTitle = TEXT("__runtime_lifecycle__");
+    Event.NodeClass = TEXT("RuntimeLifecycle");
+    Event.SettingsClass = TEXT("RuntimeLifecycle");
+    Event.Phase = Phase.IsEmpty() ? TEXT("runtime_lifecycle") : Phase;
+    Event.InclusiveMs = FMath::Max(0.0, SpawnMs + DestroyMs);
+    Event.SelfMs = Event.InclusiveMs;
+    Event.DurationMs = Event.InclusiveMs;
+    Event.ExecutionMs = Event.InclusiveMs;
+    Event.ThreadGroup = TEXT("GameThread");
+    Event.ThreadSource = TEXT("runtime_api");
+    Event.FirstSeenTimeSource = TEXT("runtime_api");
+    Event.RunMode = RuntimeContext.RunMode;
+    Event.WorldType = RuntimeContext.WorldType;
+    Event.bIsPIE = RuntimeContext.bIsPIE;
+    Event.bIsCooked = RuntimeContext.bIsCooked;
+    Event.CellId = CellId;
+    Event.StreamingEvent = StreamingEvent.IsEmpty() ? TEXT("none") : StreamingEvent;
+    Event.GenerateReason = GenerateReason.IsEmpty() ? TEXT("unknown") : GenerateReason;
+    Event.SpawnCount = FMath::Max(0, SpawnCount);
+    Event.DestroyCount = FMath::Max(0, DestroyCount);
+    Event.SpawnMs = FMath::Max(0.0, SpawnMs);
+    Event.DestroyMs = FMath::Max(0.0, DestroyMs);
+
+    {
+        FScopeLock Lock(&DataMutex);
+        const double NowSeconds = FPlatformTime::Seconds();
+        RuntimeLastLifecycleEventAtSeconds = NowSeconds;
+        ++RuntimeLifecycleEventCount;
+        if (!Event.StreamingEvent.Equals(TEXT("none"), ESearchCase::IgnoreCase))
+        {
+            ++RuntimeStreamingEventCount;
+        }
+        RuntimeSpawnCountAccum += Event.SpawnCount;
+        RuntimeDestroyCountAccum += Event.DestroyCount;
+        RuntimeSpawnMsAccum += Event.SpawnMs;
+        RuntimeDestroyMsAccum += Event.DestroyMs;
+        RuntimeLastCellId = Event.CellId;
+        RuntimeLastStreamingEvent = Event.StreamingEvent;
+        RuntimeLastGenerateReason = Event.GenerateReason;
+    }
+
+    RecordNodeEvent(Event);
+}
+
+void UPCGProfilerSubsystem::RefreshRuntimeLifecycleBindings()
+{
+    TRACE_CPUPROFILER_EVENT_SCOPE(PCGProfiler_RefreshRuntimeLifecycleBindings);
+
+    TArray<TWeakObjectPtr<UPCGComponent>> Components;
+    PCGProfilerRuntime::CollectAllPCGComponents(Components);
+
+    for (const TWeakObjectPtr<UPCGComponent>& WeakComponent : Components)
+    {
+        UPCGComponent* Component = WeakComponent.Get();
+        if (!Component || RuntimeBoundLifecycleComponents.Contains(Component))
+        {
+            continue;
+        }
+
+        Component->OnPCGGraphStartGeneratingDelegate.AddUObject(this, &UPCGProfilerSubsystem::HandlePCGGraphStartGenerating);
+        Component->OnPCGGraphGeneratedDelegate.AddUObject(this, &UPCGProfilerSubsystem::HandlePCGGraphGenerated);
+        Component->OnPCGGraphCleanedDelegate.AddUObject(this, &UPCGProfilerSubsystem::HandlePCGGraphCleaned);
+        Component->OnPCGGraphCancelledDelegate.AddUObject(this, &UPCGProfilerSubsystem::HandlePCGGraphCancelled);
+        RuntimeBoundLifecycleComponents.Add(Component);
+    }
+}
+
+void UPCGProfilerSubsystem::ClearRuntimeLifecycleBindings()
+{
+    for (const TWeakObjectPtr<UPCGComponent>& WeakComponent : RuntimeBoundLifecycleComponents)
+    {
+        UPCGComponent* Component = WeakComponent.Get();
+        if (!Component)
+        {
+            continue;
+        }
+
+        Component->OnPCGGraphStartGeneratingDelegate.RemoveAll(this);
+        Component->OnPCGGraphGeneratedDelegate.RemoveAll(this);
+        Component->OnPCGGraphCleanedDelegate.RemoveAll(this);
+        Component->OnPCGGraphCancelledDelegate.RemoveAll(this);
+    }
+
+    RuntimeBoundLifecycleComponents.Reset();
+}
+
+void UPCGProfilerSubsystem::HandlePCGGraphStartGenerating(UPCGComponent* InComponent)
+{
+    const FString CellId = PCGProfilerRuntimeSemantic::BuildCellIdFromComponent(InComponent);
+    const FString ComponentKey = InComponent ? InComponent->GetPathName() : FString();
+    const double NowSeconds = FPlatformTime::Seconds();
+    FString Reason = TEXT("player_triggered");
+    {
+        FScopeLock Lock(&DataMutex);
+        if (!ComponentKey.IsEmpty())
+        {
+            RuntimeGeneratedComponentKeysSeen.Remove(ComponentKey);
+        }
+        if ((NowSeconds - RunStartPlatformSeconds) <= 5.0)
+        {
+            Reason = TEXT("initial_generation");
+        }
+        else if (RuntimeLastCellLoadAtSeconds > 0.0
+            && (NowSeconds - RuntimeLastCellLoadAtSeconds) <= 5.0
+            && !RuntimeLastLoadedCellId.IsEmpty()
+            && (CellId.IsEmpty() || RuntimeLastLoadedCellId == CellId))
+        {
+            Reason = TEXT("streaming_return");
+        }
+    }
+    RecordRuntimeLifecycleEvent(TEXT("GenerateStart"), Reason, CellId, TEXT("none"), 0, 0, 0.0, 0.0);
+}
+
+void UPCGProfilerSubsystem::HandlePCGGraphGenerated(UPCGComponent* InComponent)
+{
+    const FString ComponentKey = InComponent ? InComponent->GetPathName() : FString();
+    {
+        FScopeLock Lock(&DataMutex);
+        if (!ComponentKey.IsEmpty())
+        {
+            if (RuntimeGeneratedComponentKeysSeen.Contains(ComponentKey))
+            {
+                return;
+            }
+            RuntimeGeneratedComponentKeysSeen.Add(ComponentKey);
+        }
+    }
+
+    const FString CellId = PCGProfilerRuntimeSemantic::BuildCellIdFromComponent(InComponent);
+    RecordRuntimeLifecycleEvent(TEXT("GenerateEnd"), TEXT("component_delegate"), CellId, TEXT("none"), 1, 0, 0.0, 0.0);
+}
+
+void UPCGProfilerSubsystem::HandlePCGGraphCleaned(UPCGComponent* InComponent)
+{
+    const FString CellId = PCGProfilerRuntimeSemantic::BuildCellIdFromComponent(InComponent);
+    RecordRuntimeLifecycleEvent(TEXT("CleanupEnd"), TEXT("component_delegate"), CellId, TEXT("none"), 0, 1, 0.0, 0.0);
+}
+
+void UPCGProfilerSubsystem::HandlePCGGraphCancelled(UPCGComponent* InComponent)
+{
+    const FString CellId = PCGProfilerRuntimeSemantic::BuildCellIdFromComponent(InComponent);
+    RecordRuntimeLifecycleEvent(TEXT("GenerateCancelled"), TEXT("component_delegate"), CellId, TEXT("none"), 0, 0, 0.0, 0.0);
+}
+
+void UPCGProfilerSubsystem::HandleLevelAddedToWorld(ULevel* InLevel, UWorld* InWorld)
+{
+    const FString CellId = PCGProfilerRuntimeSemantic::BuildCellIdFromLevel(InLevel);
+    {
+        FScopeLock Lock(&DataMutex);
+        RuntimeLastCellLoadAtSeconds = FPlatformTime::Seconds();
+        RuntimeLastLoadedCellId = CellId;
+    }
+    RecordRuntimeLifecycleEvent(TEXT("CellLoad"), TEXT("streaming"), CellId, TEXT("load"), 0, 0, 0.0, 0.0);
+    RefreshRuntimeLifecycleBindings();
+}
+
+void UPCGProfilerSubsystem::HandleLevelRemovedFromWorld(ULevel* InLevel, UWorld* InWorld)
+{
+    const FString CellId = PCGProfilerRuntimeSemantic::BuildCellIdFromLevel(InLevel);
+    RecordRuntimeLifecycleEvent(TEXT("CellUnload"), TEXT("streaming"), CellId, TEXT("unload"), 0, 0, 0.0, 0.0);
 }
 
 void UPCGProfilerSubsystem::RecordNodeTiming(const FString& InNodeName, double DurationMs)
@@ -488,6 +731,31 @@ bool UPCGProfilerSubsystem::IsRunIdle() const
     return GetActivePCGComponentCount() == 0;
 }
 
+bool UPCGProfilerSubsystem::IsRunConverged(double StableWindowSeconds, int32 RequiredIdleTicks)
+{
+    const double SafeStableWindowSeconds = FMath::Max(0.2, StableWindowSeconds);
+    const int32 SafeRequiredIdleTicks = FMath::Max(1, RequiredIdleTicks);
+    const double NowSeconds = FPlatformTime::Seconds();
+
+    int32 CurrentComponentCount = 0;
+    PCGProfilerRuntime::ResolvePrimaryPCGWorld(&CurrentComponentCount);
+    const bool bIdleNow = (GetActivePCGComponentCount() == 0);
+
+    FScopeLock Lock(&DataMutex);
+    if (RuntimeLastComponentCount != CurrentComponentCount)
+    {
+        RuntimeLastComponentCount = CurrentComponentCount;
+        RuntimeLastComponentChangeAtSeconds = NowSeconds;
+    }
+
+    RuntimeConvergedIdleTicks = bIdleNow ? (RuntimeConvergedIdleTicks + 1) : 0;
+
+    const bool bIdleStable = RuntimeConvergedIdleTicks >= SafeRequiredIdleTicks;
+    const bool bComponentStable = (NowSeconds - RuntimeLastComponentChangeAtSeconds) >= SafeStableWindowSeconds;
+    const bool bLifecycleQuiet = (NowSeconds - RuntimeLastLifecycleEventAtSeconds) >= SafeStableWindowSeconds;
+    return bIdleStable && bComponentStable && bLifecycleQuiet;
+}
+
 bool UPCGProfilerSubsystem::WaitForRunComplete(double TimeoutSeconds, double PollIntervalSeconds)
 {
     const double SafeTimeoutSeconds = FMath::Max(0.0, TimeoutSeconds);
@@ -496,7 +764,7 @@ bool UPCGProfilerSubsystem::WaitForRunComplete(double TimeoutSeconds, double Pol
 
     while (true)
     {
-        if (IsRunIdle())
+        if (IsRunConverged(2.0, 3))
         {
             return true;
         }
@@ -580,7 +848,13 @@ bool UPCGProfilerSubsystem::RunOneClickProfile(double TimeoutSeconds, double Pol
     }
 
     PCGSubsystem->CleanupAllPCGComponents(/*bPurge=*/bOneClickUsePurge);
+    RecordRuntimeLifecycleEvent(TEXT("CleanupStart"), TEXT("explicit_one_click"), TEXT(""), TEXT("none"), 0, 0, 0.0, 0.0);
     PCGSubsystem->GenerateAllPCGComponents(/*bForce=*/true);
+    if (TargetWorldComponentCount > 0)
+    {
+        bOneClickObservedActiveWork = true;
+    }
+    RecordRuntimeLifecycleEvent(TEXT("GenerateStart"), TEXT("explicit_one_click"), TEXT(""), TEXT("none"), 0, 0, 0.0, 0.0);
 
     OneClickTickHandle = FTSTicker::GetCoreTicker().AddTicker(
         FTickerDelegate::CreateUObject(this, &UPCGProfilerSubsystem::TickOneClickProfile),
@@ -719,7 +993,7 @@ bool UPCGProfilerSubsystem::TickOneClickProfile(float DeltaTime)
         return false;
     }
 
-    const bool bIdle = IsRunIdle();
+    const bool bIdle = IsRunConverged(2.0, 3);
     const int32 ActiveComponentsNow = GetActivePCGComponentCount();
     if (ActiveComponentsNow > 0)
     {
@@ -737,6 +1011,7 @@ bool UPCGProfilerSubsystem::TickOneClickProfile(float DeltaTime)
 
     if (bOneClickObservedActiveWork && OneClickIdleStableTicks >= 3)
     {
+        RecordRuntimeLifecycleEvent(TEXT("GenerateEnd"), TEXT("settled"), TEXT(""), TEXT("none"), 0, 0, 0.0, 0.0);
         FinishOneClickProfile(TEXT("stable_by_cpp_idle"), false);
         return false;
     }
@@ -744,11 +1019,12 @@ bool UPCGProfilerSubsystem::TickOneClickProfile(float DeltaTime)
     if ((NowSeconds - OneClickLastPollAtSeconds) >= 5.0)
     {
         OneClickLastPollAtSeconds = NowSeconds;
-        UE_LOG(LogTemp, Display, TEXT("PCGProfiler OneClick waiting: run=%s elapsed=%.1fs active_components=%d idle_ticks=%d"),
+        UE_LOG(LogTemp, Display, TEXT("PCGProfiler OneClick waiting: run=%s elapsed=%.1fs active_components=%d idle_ticks=%d lifecycle_events=%d"),
             *OneClickRunName,
             ElapsedSeconds,
             ActiveComponentsNow,
-            OneClickIdleStableTicks);
+            OneClickIdleStableTicks,
+            RuntimeLifecycleEventCount);
     }
 
     return true;
@@ -858,7 +1134,7 @@ void UPCGProfilerSubsystem::FinishOneClickProfile(const FString& Reason, bool bD
                     UWorld* CurrentWorld = PCGProfilerRuntime::ResolvePrimaryPCGWorld(&CurrentComponentCount);
                     const FString CurrentWorldPath = CurrentWorld ? CurrentWorld->GetPathName() : FString();
                     const int32 ActiveComponents = GetActivePCGComponentCount();
-                    const bool bIdle = (ActiveComponents == 0);
+                    const bool bIdle = IsRunConverged(2.0, BatchPreStartRequiredIdleTicks);
                     BatchPreStartIdleTicks = bIdle ? (BatchPreStartIdleTicks + 1) : 0;
 
                     if (BatchPreStartLastComponentCount != CurrentComponentCount)

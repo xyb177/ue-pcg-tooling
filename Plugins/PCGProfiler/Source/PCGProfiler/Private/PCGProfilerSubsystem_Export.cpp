@@ -15,6 +15,7 @@
 #include "ProfilingDebugging/CpuProfilerTrace.h"
 #include "Serialization/JsonSerializer.h"
 #include "Serialization/JsonWriter.h"
+#include "Engine/Engine.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 
@@ -81,6 +82,15 @@ bool UPCGProfilerSubsystem::ExportJsonReport(const FString& OptionalAbsoluteOrRe
     int32 LocalMemoryWarningCount = 0;
     int64 LocalPeakProcessMemoryBytes = 0;
     int32 LocalEventsInMemory = 0;
+    int32 LocalRuntimeLifecycleEventCount = 0;
+    int32 LocalRuntimeStreamingEventCount = 0;
+    int64 LocalRuntimeSpawnCountAccum = 0;
+    int64 LocalRuntimeDestroyCountAccum = 0;
+    double LocalRuntimeSpawnMsAccum = 0.0;
+    double LocalRuntimeDestroyMsAccum = 0.0;
+    FString LocalRuntimeLastCellId;
+    FString LocalRuntimeLastStreamingEvent;
+    FString LocalRuntimeLastGenerateReason;
 
     {
         FScopeLock Lock(&DataMutex);
@@ -100,6 +110,15 @@ bool UPCGProfilerSubsystem::ExportJsonReport(const FString& OptionalAbsoluteOrRe
         LocalFlushCount = FlushCount;
         LocalMemoryWarningCount = MemoryWarningCount;
         LocalPeakProcessMemoryBytes = PeakProcessMemoryBytes;
+        LocalRuntimeLifecycleEventCount = RuntimeLifecycleEventCount;
+        LocalRuntimeStreamingEventCount = RuntimeStreamingEventCount;
+        LocalRuntimeSpawnCountAccum = RuntimeSpawnCountAccum;
+        LocalRuntimeDestroyCountAccum = RuntimeDestroyCountAccum;
+        LocalRuntimeSpawnMsAccum = RuntimeSpawnMsAccum;
+        LocalRuntimeDestroyMsAccum = RuntimeDestroyMsAccum;
+        LocalRuntimeLastCellId = RuntimeLastCellId;
+        LocalRuntimeLastStreamingEvent = RuntimeLastStreamingEvent;
+        LocalRuntimeLastGenerateReason = RuntimeLastGenerateReason;
     }
 
     if (!LocalFlushedChunkPaths.IsEmpty())
@@ -197,10 +216,37 @@ bool UPCGProfilerSubsystem::ExportJsonReport(const FString& OptionalAbsoluteOrRe
     Root->SetStringField(TEXT("build_config"), LexToString(FApp::GetBuildConfiguration()));
     Root->SetStringField(TEXT("graph_name"), LastGraphName);
     Root->SetStringField(TEXT("component_name"), LastComponentName);
-    Root->SetStringField(TEXT("map_name"), FApp::GetProjectName());
     Root->SetStringField(TEXT("percentile_method"), TEXT("linear_interpolation"));
     Root->SetStringField(TEXT("memory_scope"), TEXT("process_estimate"));
     Root->SetBoolField(TEXT("sampling_enabled"), IsSamplingEnabled());
+    const PCGProfilerRuntimeSemantic::FRunContext RuntimeContext = PCGProfilerRuntimeSemantic::ResolveRunContext();
+    UWorld* ContextWorld = RuntimeContext.ContextWorld;
+
+    FString MapName = FApp::GetProjectName();
+    FString MapPath;
+    if (ContextWorld)
+    {
+        const UPackage* WorldPackage = ContextWorld->GetOutermost();
+        if (WorldPackage)
+        {
+            MapPath = WorldPackage->GetName();
+        }
+        MapName = ContextWorld->GetMapName();
+        const FString StreamingPrefix = ContextWorld->StreamingLevelsPrefix;
+        if (!StreamingPrefix.IsEmpty())
+        {
+            MapName.RemoveFromStart(StreamingPrefix);
+        }
+    }
+    Root->SetStringField(TEXT("map_name"), MapName);
+    Root->SetStringField(TEXT("map_path"), MapPath);
+    Root->SetStringField(TEXT("run_mode"), RuntimeContext.RunMode);
+    Root->SetStringField(TEXT("world_type"), RuntimeContext.WorldType);
+    Root->SetBoolField(TEXT("is_pie"), RuntimeContext.bIsPIE);
+    Root->SetBoolField(TEXT("is_cooked"), RuntimeContext.bIsCooked);
+    Root->SetStringField(TEXT("cell_id"), LocalRuntimeLastCellId);
+    Root->SetStringField(TEXT("streaming_event"), LocalRuntimeLastStreamingEvent.IsEmpty() ? TEXT("none") : LocalRuntimeLastStreamingEvent);
+    Root->SetStringField(TEXT("generate_reason"), LocalRuntimeLastGenerateReason.IsEmpty() ? TEXT("unknown") : LocalRuntimeLastGenerateReason);
     Root->SetStringField(TEXT("run_start_utc"), LocalRunStart.ToIso8601());
     Root->SetStringField(TEXT("run_end_utc"), LocalRunEnd.ToIso8601());
     Root->SetNumberField(TEXT("run_duration_ms"), static_cast<double>((LocalRunEnd - LocalRunStart).GetTotalMilliseconds()));
@@ -220,6 +266,16 @@ bool UPCGProfilerSubsystem::ExportJsonReport(const FString& OptionalAbsoluteOrRe
     TMap<FString, int64> TypeOutputPoints;
     TMap<FString, int64> TypeEstimatedMemoryBytes;
     TMap<FString, int32> TypeNodeCount;
+    struct FNodeNonZeroStats
+    {
+        int32 Samples = 0;
+        int32 InputCountNonZero = 0;
+        int32 OutputCountNonZero = 0;
+        int32 InputPointsNonZero = 0;
+        int32 OutputPointsNonZero = 0;
+        int32 DurationNonZero = 0;
+    };
+    TMap<FString, FNodeNonZeroStats> NodeNonZeroStatsByKey;
     int64 PeakNodeOutputPoints = 0;
     FString PeakNodeOutputPointsId;
     FString PeakNodeOutputPointsName;
@@ -247,8 +303,23 @@ bool UPCGProfilerSubsystem::ExportJsonReport(const FString& OptionalAbsoluteOrRe
         const FString ThreadGroup = PCGProfilerThreading::NormalizeThreadGroup(Event.ThreadGroup);
         ThreadInputPoints.FindOrAdd(ThreadGroup) += FMath::Max<int64>(0, Event.InputPoints);
         ThreadOutputPoints.FindOrAdd(ThreadGroup) += FMath::Max<int64>(0, Event.OutputPoints);
+
+        const FString EventNodeKey = BuildNodeKey(Event.NodeTitle, Event.NodeId, Event.GraphName);
+        FNodeNonZeroStats& SparseStats = NodeNonZeroStatsByKey.FindOrAdd(EventNodeKey);
+        ++SparseStats.Samples;
+        if (Event.InputCount > 0) { ++SparseStats.InputCountNonZero; }
+        if (Event.OutputCount > 0) { ++SparseStats.OutputCountNonZero; }
+        if (Event.InputPoints > 0) { ++SparseStats.InputPointsNonZero; }
+        if (Event.OutputPoints > 0) { ++SparseStats.OutputPointsNonZero; }
+        if (Event.InclusiveMs > 0.0) { ++SparseStats.DurationNonZero; }
     }
     TotalEstimatedMemoryBytes = PCGProfilerScaleStats::EstimateMemoryBytes(TotalInputPointCount, TotalOutputPointCount);
+
+    int64 TotalPeakEstimatedMemoryBytes = 0;
+    for (const FPCGProfilerNodeAggregate& Node : Aggregates)
+    {
+        TotalPeakEstimatedMemoryBytes += PCGProfilerScaleStats::EstimateMemoryBytes(Node.InputPointsMax, Node.OutputPointsMax);
+    }
 
     TArray<TSharedPtr<FJsonValue>> NodeArray;
     NodeArray.Reserve(Aggregates.Num());
@@ -256,8 +327,10 @@ bool UPCGProfilerSubsystem::ExportJsonReport(const FString& OptionalAbsoluteOrRe
     {
         TSharedPtr<FJsonObject> NodeObj = MakeShared<FJsonObject>();
         const FString NodeKey = BuildNodeKey(Node.NodeName, Node.NodeId, Node.GraphName);
+        const FNodeNonZeroStats* SparseStats = NodeNonZeroStatsByKey.Find(NodeKey);
+        const double SparseSampleCount = SparseStats ? static_cast<double>(SparseStats->Samples) : 0.0;
         const double ChildInclusiveMs = NodeChildInclusiveMs.FindRef(NodeKey);
-        const double ComputedSelfMs = (Node.SelfMs > 0.0) ? Node.SelfMs : FMath::Max(0.0, Node.TotalMs - ChildInclusiveMs);
+        const double ComputedSelfMs = FMath::Max(0.0, Node.TotalMs - ChildInclusiveMs);
         NodeObj->SetStringField(TEXT("node_name"), Node.NodeName);
         NodeObj->SetStringField(TEXT("node_title"), Node.NodeName);
         NodeObj->SetStringField(TEXT("node_id"), Node.NodeId);
@@ -277,32 +350,51 @@ bool UPCGProfilerSubsystem::ExportJsonReport(const FString& OptionalAbsoluteOrRe
         NodeObj->SetNumberField(TEXT("duration_cv"), Node.DurationCv);
         NodeObj->SetNumberField(TEXT("p50_ms"), Node.P50Ms);
         NodeObj->SetNumberField(TEXT("p95_ms"), Node.P95Ms);
+        NodeObj->SetNumberField(TEXT("sparse_sample_count"), SparseSampleCount);
+        NodeObj->SetNumberField(TEXT("duration_nonzero_samples"), SparseStats ? SparseStats->DurationNonZero : 0.0);
+        NodeObj->SetNumberField(TEXT("duration_nonzero_rate"), (SparseStats && SparseStats->Samples > 0) ? (static_cast<double>(SparseStats->DurationNonZero) / static_cast<double>(SparseStats->Samples)) : 0.0);
         NodeObj->SetNumberField(TEXT("first_seen_time_ms"), Node.FirstSeenTimeMs);
         NodeObj->SetStringField(TEXT("first_seen_time_source"), Node.FirstSeenTimeSource);
         NodeObj->SetNumberField(TEXT("input_count_max"), Node.InputCountMax);
         NodeObj->SetNumberField(TEXT("input_count_sum"), static_cast<double>(Node.InputCountSum));
+        NodeObj->SetStringField(TEXT("input_count_sum_i64"), LexToString(Node.InputCountSum));
         NodeObj->SetNumberField(TEXT("input_count_last"), Node.InputCountLast);
         NodeObj->SetNumberField(TEXT("input_count_avg"), Node.InputCountAvg);
         NodeObj->SetNumberField(TEXT("input_count_p95"), Node.InputCountP95);
         NodeObj->SetNumberField(TEXT("input_count_cv"), Node.InputCountCv);
+        NodeObj->SetNumberField(TEXT("input_count_nonzero_samples"), SparseStats ? SparseStats->InputCountNonZero : 0.0);
+        NodeObj->SetNumberField(TEXT("input_count_nonzero_rate"), (SparseStats && SparseStats->Samples > 0) ? (static_cast<double>(SparseStats->InputCountNonZero) / static_cast<double>(SparseStats->Samples)) : 0.0);
         NodeObj->SetNumberField(TEXT("output_count_max"), Node.OutputCountMax);
         NodeObj->SetNumberField(TEXT("output_count_sum"), static_cast<double>(Node.OutputCountSum));
+        NodeObj->SetStringField(TEXT("output_count_sum_i64"), LexToString(Node.OutputCountSum));
         NodeObj->SetNumberField(TEXT("output_count_last"), Node.OutputCountLast);
         NodeObj->SetNumberField(TEXT("output_count_avg"), Node.OutputCountAvg);
         NodeObj->SetNumberField(TEXT("output_count_p95"), Node.OutputCountP95);
         NodeObj->SetNumberField(TEXT("output_count_cv"), Node.OutputCountCv);
+        NodeObj->SetNumberField(TEXT("output_count_nonzero_samples"), SparseStats ? SparseStats->OutputCountNonZero : 0.0);
+        NodeObj->SetNumberField(TEXT("output_count_nonzero_rate"), (SparseStats && SparseStats->Samples > 0) ? (static_cast<double>(SparseStats->OutputCountNonZero) / static_cast<double>(SparseStats->Samples)) : 0.0);
         NodeObj->SetNumberField(TEXT("input_points_max"), static_cast<double>(Node.InputPointsMax));
+        NodeObj->SetStringField(TEXT("input_points_max_i64"), LexToString(Node.InputPointsMax));
         NodeObj->SetNumberField(TEXT("input_points_sum"), static_cast<double>(Node.InputPointsSum));
+        NodeObj->SetStringField(TEXT("input_points_sum_i64"), LexToString(Node.InputPointsSum));
         NodeObj->SetNumberField(TEXT("input_points_last"), static_cast<double>(Node.InputPointsLast));
+        NodeObj->SetStringField(TEXT("input_points_last_i64"), LexToString(Node.InputPointsLast));
         NodeObj->SetNumberField(TEXT("input_points_avg"), Node.InputPointsAvg);
         NodeObj->SetNumberField(TEXT("input_points_p95"), Node.InputPointsP95);
         NodeObj->SetNumberField(TEXT("input_points_cv"), Node.InputPointsCv);
+        NodeObj->SetNumberField(TEXT("input_points_nonzero_samples"), SparseStats ? SparseStats->InputPointsNonZero : 0.0);
+        NodeObj->SetNumberField(TEXT("input_points_nonzero_rate"), (SparseStats && SparseStats->Samples > 0) ? (static_cast<double>(SparseStats->InputPointsNonZero) / static_cast<double>(SparseStats->Samples)) : 0.0);
         NodeObj->SetNumberField(TEXT("output_points_max"), static_cast<double>(Node.OutputPointsMax));
+        NodeObj->SetStringField(TEXT("output_points_max_i64"), LexToString(Node.OutputPointsMax));
         NodeObj->SetNumberField(TEXT("output_points_sum"), static_cast<double>(Node.OutputPointsSum));
+        NodeObj->SetStringField(TEXT("output_points_sum_i64"), LexToString(Node.OutputPointsSum));
         NodeObj->SetNumberField(TEXT("output_points_last"), static_cast<double>(Node.OutputPointsLast));
+        NodeObj->SetStringField(TEXT("output_points_last_i64"), LexToString(Node.OutputPointsLast));
         NodeObj->SetNumberField(TEXT("output_points_avg"), Node.OutputPointsAvg);
         NodeObj->SetNumberField(TEXT("output_points_p95"), Node.OutputPointsP95);
         NodeObj->SetNumberField(TEXT("output_points_cv"), Node.OutputPointsCv);
+        NodeObj->SetNumberField(TEXT("output_points_nonzero_samples"), SparseStats ? SparseStats->OutputPointsNonZero : 0.0);
+        NodeObj->SetNumberField(TEXT("output_points_nonzero_rate"), (SparseStats && SparseStats->Samples > 0) ? (static_cast<double>(SparseStats->OutputPointsNonZero) / static_cast<double>(SparseStats->Samples)) : 0.0);
         const double OutputInputRatioMax = PCGProfilerScaleStats::SafeRatio(static_cast<double>(Node.OutputPointsMax), static_cast<double>(Node.InputPointsMax), Node.OutputPointsMax > 0 ? 1.0 : 0.0);
         const double OutputInputRatioSum = PCGProfilerScaleStats::SafeRatio(static_cast<double>(Node.OutputPointsSum), static_cast<double>(Node.InputPointsSum), Node.OutputPointsSum > 0 ? 1.0 : 0.0);
         NodeObj->SetNumberField(TEXT("output_input_ratio_max"), OutputInputRatioMax);
@@ -317,7 +409,7 @@ bool UPCGProfilerSubsystem::ExportJsonReport(const FString& OptionalAbsoluteOrRe
         NodeObj->SetNumberField(
             TEXT("estimated_memory_bytes"),
             static_cast<double>(NodeEstimatedMemoryBytes));
-        NodeObj->SetNumberField(TEXT("memory_share_sum"), TotalEstimatedMemoryBytes > 0 ? (static_cast<double>(NodeEstimatedMemoryBytes) / static_cast<double>(TotalEstimatedMemoryBytes)) : 0.0);
+        NodeObj->SetNumberField(TEXT("memory_share_sum"), TotalPeakEstimatedMemoryBytes > 0 ? (static_cast<double>(NodeEstimatedMemoryBytes) / static_cast<double>(TotalPeakEstimatedMemoryBytes)) : 0.0);
         NodeObj->SetNumberField(TEXT("point_share_sum"), TotalOutputPointCount > 0 ? (static_cast<double>(Node.OutputPointsSum) / static_cast<double>(TotalOutputPointCount)) : 0.0);
         NodeObj->SetNumberField(TEXT("point_share_peak"), GlobalPeakOutputPoints > 0 ? (static_cast<double>(Node.OutputPointsMax) / static_cast<double>(GlobalPeakOutputPoints)) : 0.0);
         NodeObj->SetStringField(TEXT("estimated_memory_method"), TEXT("point_count_x_160_bytes"));
@@ -347,9 +439,13 @@ bool UPCGProfilerSubsystem::ExportJsonReport(const FString& OptionalAbsoluteOrRe
         NodeObj->SetNumberField(TEXT("miss_reason_unknown_count"), Node.MissReasonUnknownCount);
         NodeObj->SetNumberField(TEXT("cache_reuse_saved_ms_estimate"), Node.CacheReuseSavedMsEstimate);
         NodeObj->SetNumberField(TEXT("measured_memory_delta_sum_bytes"), static_cast<double>(Node.MemoryDeltaSumBytes));
+        NodeObj->SetStringField(TEXT("measured_memory_delta_sum_bytes_i64"), LexToString(Node.MemoryDeltaSumBytes));
         NodeObj->SetNumberField(TEXT("measured_memory_delta_max_bytes"), static_cast<double>(Node.MemoryDeltaMaxBytes));
+        NodeObj->SetStringField(TEXT("measured_memory_delta_max_bytes_i64"), LexToString(Node.MemoryDeltaMaxBytes));
         NodeObj->SetNumberField(TEXT("measured_memory_delta_min_bytes"), static_cast<double>(Node.MemoryDeltaMinBytes));
+        NodeObj->SetStringField(TEXT("measured_memory_delta_min_bytes_i64"), LexToString(Node.MemoryDeltaMinBytes));
         NodeObj->SetNumberField(TEXT("measured_memory_delta_last_bytes"), static_cast<double>(Node.MemoryDeltaLastBytes));
+        NodeObj->SetStringField(TEXT("measured_memory_delta_last_bytes_i64"), LexToString(Node.MemoryDeltaLastBytes));
         NodeObj->SetNumberField(TEXT("measured_memory_delta_avg_bytes"), Node.MemoryDeltaAvgBytes);
         NodeObj->SetNumberField(TEXT("measured_memory_delta_p95_bytes"), Node.MemoryDeltaP95Bytes);
         NodeObj->SetNumberField(TEXT("measured_memory_delta_cv"), Node.MemoryDeltaCv);
@@ -396,16 +492,95 @@ bool UPCGProfilerSubsystem::ExportJsonReport(const FString& OptionalAbsoluteOrRe
 
     TArray<TSharedPtr<FJsonValue>> EventArray;
     EventArray.Reserve(LocalEvents.Num());
-    for (const FPCGProfilerNodeEvent& Event : LocalEvents)
+    int64 RuntimeSpawnCount = 0;
+    int64 RuntimeDestroyCount = 0;
+    double RuntimeSpawnMs = 0.0;
+    double RuntimeDestroyMs = 0.0;
+    int32 MissingRequiredEventCount = 0;
+    int32 MissingRequiredFieldTotal = 0;
+    TMap<FString, int32> RuntimeGenerateReasonCounts;
+    TMap<FString, int32> RuntimeStreamingEventCounts;
+    TMap<FString, int32> RuntimeCellEventCounts;
+    for (FPCGProfilerNodeEvent Event : LocalEvents)
     {
+        if (Event.RunMode.IsEmpty())
+        {
+            Event.RunMode = RuntimeContext.RunMode;
+        }
+        if (Event.WorldType.IsEmpty())
+        {
+            Event.WorldType = RuntimeContext.WorldType;
+        }
+        Event.bIsPIE = Event.bIsPIE || RuntimeContext.bIsPIE;
+        Event.bIsCooked = Event.bIsCooked || RuntimeContext.bIsCooked;
+        if (Event.GenerateReason.IsEmpty())
+        {
+            Event.GenerateReason = TEXT("unknown");
+        }
+        if (Event.StreamingEvent.IsEmpty())
+        {
+            Event.StreamingEvent = TEXT("none");
+        }
+
+        RuntimeSpawnCount += static_cast<int64>(Event.SpawnCount);
+        RuntimeDestroyCount += static_cast<int64>(Event.DestroyCount);
+        RuntimeSpawnMs += Event.SpawnMs;
+        RuntimeDestroyMs += Event.DestroyMs;
+        RuntimeGenerateReasonCounts.FindOrAdd(Event.GenerateReason) += 1;
+        RuntimeStreamingEventCounts.FindOrAdd(Event.StreamingEvent) += 1;
+        if (!Event.CellId.IsEmpty())
+        {
+            RuntimeCellEventCounts.FindOrAdd(Event.CellId) += 1;
+        }
+
+        const FString MissingTag = TEXT("missing_required=");
+        const int32 MissingIndex = Event.ThreadSource.Find(MissingTag, ESearchCase::IgnoreCase);
+        if (MissingIndex != INDEX_NONE)
+        {
+            const int32 ValueStart = MissingIndex + MissingTag.Len();
+            int32 ValueEnd = ValueStart;
+            while (ValueEnd < Event.ThreadSource.Len() && FChar::IsDigit(Event.ThreadSource[ValueEnd]))
+            {
+                ++ValueEnd;
+            }
+            if (ValueEnd > ValueStart)
+            {
+                const int32 MissingFields = FCString::Atoi(*Event.ThreadSource.Mid(ValueStart, ValueEnd - ValueStart));
+                if (MissingFields > 0)
+                {
+                    ++MissingRequiredEventCount;
+                    MissingRequiredFieldTotal += MissingFields;
+                }
+            }
+        }
+
         TSharedPtr<FJsonObject> EventObj = PCGProfilerSerialization::BuildEventJsonObject(Event);
         EventArray.Add(MakeShared<FJsonValueObject>(EventObj));
     }
     Root->SetArrayField(TEXT("events"), EventArray);
+    RuntimeSpawnCount = FMath::Max(RuntimeSpawnCount, LocalRuntimeSpawnCountAccum);
+    RuntimeDestroyCount = FMath::Max(RuntimeDestroyCount, LocalRuntimeDestroyCountAccum);
+    RuntimeSpawnMs = FMath::Max(RuntimeSpawnMs, LocalRuntimeSpawnMsAccum);
+    RuntimeDestroyMs = FMath::Max(RuntimeDestroyMs, LocalRuntimeDestroyMsAccum);
+    Root->SetNumberField(TEXT("component_generate_end_count"), static_cast<double>(RuntimeSpawnCount));
+    Root->SetNumberField(TEXT("component_cleanup_end_count"), static_cast<double>(RuntimeDestroyCount));
+    Root->SetNumberField(TEXT("component_generate_ms_total"), RuntimeSpawnMs);
+    Root->SetNumberField(TEXT("component_cleanup_ms_total"), RuntimeDestroyMs);
+    // Backward compatibility for existing dashboards/scripts.
+    Root->SetNumberField(TEXT("spawn_count"), static_cast<double>(RuntimeSpawnCount));
+    Root->SetNumberField(TEXT("destroy_count"), static_cast<double>(RuntimeDestroyCount));
+    Root->SetNumberField(TEXT("spawn_ms"), RuntimeSpawnMs);
+    Root->SetNumberField(TEXT("destroy_ms"), RuntimeDestroyMs);
     Root->SetNumberField(TEXT("events_total_seen"), static_cast<double>(LocalTotalEventsSeen));
+    Root->SetStringField(TEXT("events_total_seen_i64"), LexToString(LocalTotalEventsSeen));
     Root->SetNumberField(TEXT("events_in_memory"), static_cast<double>(LocalEventsInMemory));
+    Root->SetStringField(TEXT("events_in_memory_i64"), LexToString(LocalEventsInMemory));
     Root->SetNumberField(TEXT("events_flushed_to_chunks"), static_cast<double>(LocalTotalEventsFlushed));
+    Root->SetStringField(TEXT("events_flushed_to_chunks_i64"), LexToString(LocalTotalEventsFlushed));
     Root->SetNumberField(TEXT("events_dropped"), static_cast<double>(LocalTotalEventsDropped));
+    Root->SetStringField(TEXT("events_dropped_i64"), LexToString(LocalTotalEventsDropped));
+    Root->SetNumberField(TEXT("missing_required_event_count"), MissingRequiredEventCount);
+    Root->SetNumberField(TEXT("missing_required_field_total"), MissingRequiredFieldTotal);
 
     TSharedPtr<FJsonObject> StreamingObj = MakeShared<FJsonObject>();
     StreamingObj->SetStringField(TEXT("retention_policy"), TEXT("streaming_flush_jsonl"));
@@ -419,7 +594,59 @@ bool UPCGProfilerSubsystem::ExportJsonReport(const FString& OptionalAbsoluteOrRe
     RuntimeWarningObj->SetNumberField(TEXT("memory_warning_count"), LocalMemoryWarningCount);
     RuntimeWarningObj->SetNumberField(TEXT("peak_process_memory_bytes"), static_cast<double>(LocalPeakProcessMemoryBytes));
     RuntimeWarningObj->SetNumberField(TEXT("memory_warning_threshold_bytes"), static_cast<double>(MemoryWarningThresholdBytes));
+    RuntimeWarningObj->SetNumberField(TEXT("lifecycle_event_count"), LocalRuntimeLifecycleEventCount);
+    RuntimeWarningObj->SetNumberField(TEXT("streaming_event_count"), LocalRuntimeStreamingEventCount);
     Root->SetObjectField(TEXT("runtime_warnings"), RuntimeWarningObj);
+
+    {
+        TSharedPtr<FJsonObject> RuntimeSemanticsObj = MakeShared<FJsonObject>();
+        RuntimeSemanticsObj->SetNumberField(TEXT("tracked_cells"), RuntimeCellEventCounts.Num());
+
+        TArray<TSharedPtr<FJsonValue>> GenerateReasonArray;
+        for (const TPair<FString, int32>& KV : RuntimeGenerateReasonCounts)
+        {
+            TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+            Item->SetStringField(TEXT("generate_reason"), KV.Key);
+            Item->SetNumberField(TEXT("count"), KV.Value);
+            GenerateReasonArray.Add(MakeShared<FJsonValueObject>(Item));
+        }
+        RuntimeSemanticsObj->SetArrayField(TEXT("generate_reason_breakdown"), GenerateReasonArray);
+
+        TArray<TSharedPtr<FJsonValue>> StreamingEventArray;
+        for (const TPair<FString, int32>& KV : RuntimeStreamingEventCounts)
+        {
+            TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+            Item->SetStringField(TEXT("streaming_event"), KV.Key);
+            Item->SetNumberField(TEXT("count"), KV.Value);
+            StreamingEventArray.Add(MakeShared<FJsonValueObject>(Item));
+        }
+        RuntimeSemanticsObj->SetArrayField(TEXT("streaming_event_breakdown"), StreamingEventArray);
+
+        TArray<TPair<FString, int32>> SortedCells;
+        SortedCells.Reserve(RuntimeCellEventCounts.Num());
+        for (const TPair<FString, int32>& KV : RuntimeCellEventCounts)
+        {
+            SortedCells.Add(KV);
+        }
+        SortedCells.Sort([](const TPair<FString, int32>& A, const TPair<FString, int32>& B)
+        {
+            return A.Value > B.Value;
+        });
+
+        TArray<TSharedPtr<FJsonValue>> TopCellsArray;
+        const int32 TopCellLimit = FMath::Min(10, SortedCells.Num());
+        for (int32 Index = 0; Index < TopCellLimit; ++Index)
+        {
+            const TPair<FString, int32>& KV = SortedCells[Index];
+            TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
+            Item->SetStringField(TEXT("cell_id"), KV.Key);
+            Item->SetNumberField(TEXT("event_count"), KV.Value);
+            TopCellsArray.Add(MakeShared<FJsonValueObject>(Item));
+        }
+        RuntimeSemanticsObj->SetArrayField(TEXT("top_cells_by_event_count"), TopCellsArray);
+
+        Root->SetObjectField(TEXT("runtime_semantics"), RuntimeSemanticsObj);
+    }
 
     {
         TSharedPtr<FJsonObject> MemoryProfileObj = MakeShared<FJsonObject>();
@@ -770,9 +997,10 @@ bool UPCGProfilerSubsystem::ExportJsonReport(const FString& OptionalAbsoluteOrRe
     CacheAnalysisObj->SetArrayField(TEXT("cache_miss_node_ranking"), MissRankArray);
 
     TSharedPtr<FJsonObject> MissReasonObj = MakeShared<FJsonObject>();
-    MissReasonObj->SetNumberField(TEXT("parameter_change"), GraphMissReasonParameterChangeCount);
     MissReasonObj->SetNumberField(TEXT("input_change"), GraphMissReasonInputChangeCount);
     MissReasonObj->SetNumberField(TEXT("version_change"), GraphMissReasonVersionChangeCount);
+    MissReasonObj->SetNumberField(TEXT("unknown"), GraphMissReasonParameterChangeCount);
+    MissReasonObj->SetNumberField(TEXT("parameter_change"), 0.0);
     CacheAnalysisObj->SetObjectField(TEXT("miss_reason_breakdown"), MissReasonObj);
 
     TArray<TSharedPtr<FJsonValue>> PerRunCacheArray;
@@ -1236,9 +1464,13 @@ bool UPCGProfilerSubsystem::ExportJsonReport(const FString& OptionalAbsoluteOrRe
                 {
                     ++CurrentRunSummary.MissReasonVersionChangeCount;
                 }
+                else if (Event.CacheMissReason == TEXT("unknown"))
+                {
+                    ++CurrentRunSummary.MissReasonUnknownCount;
+                }
                 else
                 {
-                    ++CurrentRunSummary.MissReasonParameterChangeCount;
+                    ++CurrentRunSummary.MissReasonUnknownCount;
                 }
             }
         }
@@ -1416,10 +1648,6 @@ bool UPCGProfilerSubsystem::ExportJsonReport(const FString& OptionalAbsoluteOrRe
     constexpr int32 StabilityTopN = 20;
     for (const FPCGProfilerNodeAggregate& Node : StabilityNodes)
     {
-        if (Node.SampleCount < 5)
-        {
-            continue;
-        }
         TSharedPtr<FJsonObject> Item = MakeShared<FJsonObject>();
         Item->SetStringField(TEXT("node_id"), Node.NodeId);
         Item->SetStringField(TEXT("node_name"), Node.NodeName);

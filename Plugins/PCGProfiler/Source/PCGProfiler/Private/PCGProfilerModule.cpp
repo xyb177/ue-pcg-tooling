@@ -39,6 +39,16 @@ public:
             TEXT("Export PCG profiler report to JSON. Usage: PCGProfiler.ExportJson [OptionalPath]"),
             FConsoleCommandWithArgsDelegate::CreateRaw(this, &FPCGProfilerModule::HandleExportJson));
 
+        StartRuntimeRunCommand = MakeUnique<FAutoConsoleCommand>(
+            TEXT("PCGProfiler.StartRuntimeRun"),
+            TEXT("Start runtime profiler run. Usage: PCGProfiler.StartRuntimeRun [OptionalRunName]"),
+            FConsoleCommandWithArgsDelegate::CreateRaw(this, &FPCGProfilerModule::HandleStartRuntimeRun));
+
+        EndRuntimeRunAndExportCommand = MakeUnique<FAutoConsoleCommand>(
+            TEXT("PCGProfiler.EndRuntimeRunAndExport"),
+            TEXT("End runtime profiler run and export JSON. Usage: PCGProfiler.EndRuntimeRunAndExport [OptionalPath]"),
+            FConsoleCommandWithArgsDelegate::CreateRaw(this, &FPCGProfilerModule::HandleEndRuntimeRunAndExport));
+
         IsRunIdleCommand = MakeUnique<FAutoConsoleCommand>(
             TEXT("PCGProfiler.IsRunIdle"),
             TEXT("Print whether PCG run is idle and active component count."),
@@ -91,6 +101,8 @@ public:
         EndRunCommand.Reset();
         ResetRunCommand.Reset();
         ExportCommand.Reset();
+        StartRuntimeRunCommand.Reset();
+        EndRuntimeRunAndExportCommand.Reset();
         IsRunIdleCommand.Reset();
         WaitForRunCompleteCommand.Reset();
         RunBatchCommand.Reset();
@@ -150,6 +162,33 @@ private:
         else
         {
             UE_LOG(LogTemp, Error, TEXT("PCGProfiler JSON export failed."));
+        }
+    }
+
+    void HandleStartRuntimeRun(const TArray<FString>& Args)
+    {
+        if (UPCGProfilerSubsystem* Subsystem = GetSubsystem())
+        {
+            const FString RunName = Args.Num() > 0 ? Args[0] : FString();
+            const FString Started = Subsystem->StartRuntimeRun(RunName);
+            UE_LOG(LogTemp, Display, TEXT("PCGProfiler StartRuntimeRun: %s"), *Started);
+        }
+    }
+
+    void HandleEndRuntimeRunAndExport(const TArray<FString>& Args)
+    {
+        if (UPCGProfilerSubsystem* Subsystem = GetSubsystem())
+        {
+            const FString OutputPath = Args.Num() > 0 ? Args[0] : FString();
+            FString SavedPath;
+            if (Subsystem->EndRuntimeRunAndExport(OutputPath, SavedPath))
+            {
+                UE_LOG(LogTemp, Display, TEXT("PCGProfiler EndRuntimeRunAndExport: %s"), *SavedPath);
+            }
+            else
+            {
+                UE_LOG(LogTemp, Error, TEXT("PCGProfiler EndRuntimeRunAndExport failed."));
+            }
         }
     }
 
@@ -350,6 +389,8 @@ private:
     TUniquePtr<FAutoConsoleCommand> EndRunCommand;
     TUniquePtr<FAutoConsoleCommand> ResetRunCommand;
     TUniquePtr<FAutoConsoleCommand> ExportCommand;
+    TUniquePtr<FAutoConsoleCommand> StartRuntimeRunCommand;
+    TUniquePtr<FAutoConsoleCommand> EndRuntimeRunAndExportCommand;
     TUniquePtr<FAutoConsoleCommand> IsRunIdleCommand;
     TUniquePtr<FAutoConsoleCommand> WaitForRunCompleteCommand;
     TUniquePtr<FAutoConsoleCommand> RunBatchCommand;

@@ -6,6 +6,10 @@
 #include "Subsystems/EngineSubsystem.h"
 #include "PCGProfilerSubsystem.generated.h"
 
+class UPCGComponent;
+class ULevel;
+class UWorld;
+
 UCLASS()
 class PCGPROFILER_API UPCGProfilerSubsystem : public UEngineSubsystem
 {
@@ -26,6 +30,23 @@ public:
 
     UFUNCTION(BlueprintCallable, Category="PCG Profiler")
     void EndRun();
+
+    UFUNCTION(BlueprintCallable, Category="PCG Profiler|Runtime")
+    FString StartRuntimeRun(const FString& OptionalRunName = TEXT(""));
+
+    UFUNCTION(BlueprintCallable, Category="PCG Profiler|Runtime")
+    bool EndRuntimeRunAndExport(const FString& OptionalAbsoluteOrRelativePath, FString& OutSavedPath);
+
+    UFUNCTION(BlueprintCallable, Category="PCG Profiler|Runtime")
+    void RecordRuntimeLifecycleEvent(
+        const FString& Phase,
+        const FString& GenerateReason = TEXT("unknown"),
+        const FString& CellId = TEXT(""),
+        const FString& StreamingEvent = TEXT("none"),
+        int32 SpawnCount = 0,
+        int32 DestroyCount = 0,
+        double SpawnMs = 0.0,
+        double DestroyMs = 0.0);
 
     UFUNCTION(BlueprintCallable, Category="PCG Profiler")
     void RecordNodeTiming(const FString& InNodeName, double DurationMs);
@@ -59,6 +80,9 @@ public:
 
     UFUNCTION(BlueprintCallable, Category="PCG Profiler")
     bool IsRunIdle() const;
+
+    UFUNCTION(BlueprintCallable, Category="PCG Profiler|Runtime")
+    bool IsRunConverged(double StableWindowSeconds = 2.0, int32 RequiredIdleTicks = 3);
 
     UFUNCTION(BlueprintCallable, Category="PCG Profiler")
     bool WaitForRunComplete(double TimeoutSeconds = 120.0, double PollIntervalSeconds = 0.05);
@@ -330,6 +354,14 @@ private:
     static FString BuildDefaultOutputPath();
     bool TickOneClickProfile(float DeltaTime);
     void FinishOneClickProfile(const FString& Reason, bool bDidTimeout);
+    void RefreshRuntimeLifecycleBindings();
+    void ClearRuntimeLifecycleBindings();
+    void HandlePCGGraphStartGenerating(UPCGComponent* InComponent);
+    void HandlePCGGraphGenerated(UPCGComponent* InComponent);
+    void HandlePCGGraphCleaned(UPCGComponent* InComponent);
+    void HandlePCGGraphCancelled(UPCGComponent* InComponent);
+    void HandleLevelAddedToWorld(ULevel* InLevel, UWorld* InWorld);
+    void HandleLevelRemovedFromWorld(ULevel* InLevel, UWorld* InWorld);
 
 private:
     mutable FCriticalSection DataMutex;
@@ -394,4 +426,23 @@ private:
     int64 MemoryWarningThresholdBytes = 3ll * 1024ll * 1024ll * 1024ll;
     FString EventChunkDir;
     TArray<FString> FlushedChunkPaths;
+
+    int32 RuntimeConvergedIdleTicks = 0;
+    int32 RuntimeLastComponentCount = -1;
+    double RuntimeLastComponentChangeAtSeconds = 0.0;
+    double RuntimeLastLifecycleEventAtSeconds = 0.0;
+    int32 RuntimeLifecycleEventCount = 0;
+    int32 RuntimeStreamingEventCount = 0;
+    int64 RuntimeSpawnCountAccum = 0;
+    int64 RuntimeDestroyCountAccum = 0;
+    double RuntimeSpawnMsAccum = 0.0;
+    double RuntimeDestroyMsAccum = 0.0;
+    FString RuntimeLastCellId;
+    FString RuntimeLastStreamingEvent;
+    FString RuntimeLastGenerateReason;
+    double RuntimeLastCellLoadAtSeconds = 0.0;
+    FString RuntimeLastLoadedCellId;
+    TSet<TWeakObjectPtr<UPCGComponent>> RuntimeBoundLifecycleComponents;
+    TSet<FString> RuntimeGeneratedComponentKeysSeen;
+    bool bRuntimeWorldDelegatesBound = false;
 };

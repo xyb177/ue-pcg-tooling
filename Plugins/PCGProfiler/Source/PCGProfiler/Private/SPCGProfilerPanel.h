@@ -18,6 +18,8 @@ public:
         FPCGProfilerNodeAggregate Aggregate;
         double OutputInputRatio = 0.0;
         double OutputInputRatioPeak = 0.0;
+        double DurationNonZeroRate = 0.0;
+        FString RunModeBucket = TEXT("unknown");
     };
 
     struct FEventItem
@@ -42,6 +44,7 @@ private:
     void OnFilterTextChanged(const FText& InText);
     void OnEventThreadFilterChanged(const FText& InText);
     void OnEventCacheFilterChanged(const FText& InText);
+    FReply OnCycleRunModeFilterClicked();
 
     FReply OnStartRunClicked();
     FReply OnEndRunClicked();
@@ -53,6 +56,10 @@ private:
     FReply OnOpenDashboardClicked();
     FReply OnLocateClicked();
     FReply OnRebuildSelectedClicked();
+
+    void OnColumnSort(EColumnSortPriority::Type SortPriority, const FName& ColumnName, EColumnSortMode::Type InSortMode);
+    EColumnSortMode::Type GetColumnSortMode(FName ColumnName) const;
+    static double GetSortValue(const TSharedPtr<FNodeItem>& Item, const FName& ColumnName);
 
     class UPCGProfilerSubsystem* GetSubsystem() const;
     bool GetSelectedComponentAndActor(class UPCGComponent*& OutComponent, class AActor*& OutActor) const;
@@ -77,12 +84,17 @@ private:
     FString FilterText;
     FString EventThreadFilter = TEXT("all");
     FString EventCacheFilter = TEXT("all");
+    FString RunModeFilter = TEXT("all");
+    FString EventRunModeFallback = TEXT("editor");
     FString StatusText;
     FString DiagnosticsText;
     FString SelectionDetails;
     FString TimelineText;
     FString RebuildCompareText;
     FString BatchIterationsText = TEXT("10");
+
+    FName SortColumn = TEXT("TotalMs");
+    EColumnSortMode::Type SortMode = EColumnSortMode::Descending;
 
     bool bPendingRebuildCompare = false;
     bool bRefreshingData = false;

@@ -15,6 +15,8 @@
 #include "Data/PCGBasePointData.h"
 #include "Data/PCGSpatialData.h"
 #include "Data/PCGSurfaceData.h"
+#include "Engine/Engine.h"
+#include "Engine/Level.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
 
@@ -503,6 +505,127 @@ namespace PCGProfilerRuntime
         }
 
         return ActiveCount;
+    }
+}
+
+namespace PCGProfilerRuntimeSemantic
+{
+    struct FRunContext
+    {
+        FString RunMode = GIsEditor ? TEXT("editor") : TEXT("runtime");
+        FString WorldType = TEXT("Editor");
+        bool bIsPIE = false;
+        bool bIsCooked = FPlatformProperties::RequiresCookedData();
+        UWorld* ContextWorld = nullptr;
+    };
+
+    static FString BuildCellIdFromLevel(const ULevel* Level)
+    {
+        return Level ? Level->GetPathName() : FString();
+    }
+
+    static FString BuildCellIdFromComponent(const UPCGComponent* Component)
+    {
+        if (!Component)
+        {
+            return FString();
+        }
+
+        const AActor* Owner = Component->GetOwner();
+        if (!Owner)
+        {
+            return FString();
+        }
+
+        if (const ULevel* Level = Owner->GetLevel())
+        {
+            const FString LevelCellId = BuildCellIdFromLevel(Level);
+            if (!LevelCellId.IsEmpty())
+            {
+                return LevelCellId;
+            }
+        }
+
+        return Owner->GetPathName();
+    }
+
+    static FString ToWorldTypeString(const EWorldType::Type WorldType)
+    {
+        switch (WorldType)
+        {
+            case EWorldType::Editor: return TEXT("Editor");
+            case EWorldType::EditorPreview: return TEXT("EditorPreview");
+            case EWorldType::PIE: return TEXT("PIE");
+            case EWorldType::Game: return TEXT("Game");
+            case EWorldType::GamePreview: return TEXT("GamePreview");
+            case EWorldType::GameRPC: return TEXT("GameRPC");
+            case EWorldType::Inactive: return TEXT("Inactive");
+            default: return TEXT("Unknown");
+        }
+    }
+
+    static FRunContext ResolveRunContext()
+    {
+        FRunContext Context;
+        Context.ContextWorld = PCGProfilerRuntime::ResolvePrimaryPCGWorld(nullptr);
+        if (!Context.ContextWorld && GEngine)
+        {
+            int32 BestPriority = -1;
+            for (const FWorldContext& Ctx : GEngine->GetWorldContexts())
+            {
+                UWorld* World = Ctx.World();
+                if (!World)
+                {
+                    continue;
+                }
+
+                int32 Priority = -1;
+                if (World->WorldType == EWorldType::PIE)
+                {
+                    Priority = 3;
+                }
+                else if (World->WorldType == EWorldType::Game)
+                {
+                    Priority = 2;
+                }
+                else if (World->WorldType == EWorldType::Editor || World->WorldType == EWorldType::EditorPreview)
+                {
+                    Priority = 1;
+                }
+
+                if (Priority > BestPriority)
+                {
+                    BestPriority = Priority;
+                    Context.ContextWorld = World;
+                }
+            }
+        }
+
+        if (!Context.ContextWorld)
+        {
+            return Context;
+        }
+
+        Context.WorldType = ToWorldTypeString(Context.ContextWorld->WorldType);
+        Context.bIsPIE = (Context.ContextWorld->WorldType == EWorldType::PIE);
+        if (Context.ContextWorld->WorldType == EWorldType::PIE)
+        {
+            Context.RunMode = TEXT("pie");
+        }
+        else if (Context.ContextWorld->WorldType == EWorldType::Game)
+        {
+            Context.RunMode = Context.bIsCooked ? TEXT("packaged") : TEXT("standalone");
+        }
+        else if (Context.ContextWorld->WorldType == EWorldType::Editor || Context.ContextWorld->WorldType == EWorldType::EditorPreview)
+        {
+            Context.RunMode = TEXT("editor");
+        }
+        else
+        {
+            Context.RunMode = Context.bIsCooked ? TEXT("packaged") : TEXT("runtime");
+        }
+
+        return Context;
     }
 }
 

@@ -1,15 +1,19 @@
 ﻿param(
-    [string]$EngineRoot = "F:\UnrealEngine-5.7.3-release",
-    [string]$ProjectPath = "F:\Unreal Projects\ElectricDreamsEnv\ElectricDreamsEnv.uproject",
+    [string]$EngineRoot = "",
+    [string]$ProjectPath = "",
     [string]$Map = "/Game/Levels/PCG/ElectricDreams_PCG",
     [switch]$KeepOpen = $true
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "PCGProfiler.ScriptCommon.ps1")
+$EngineRoot = Resolve-PCGProfilerEngineRoot -PreferredEngineRoot $EngineRoot
+$ProjectPath = Resolve-PCGProfilerProjectPath -PreferredProjectPath $ProjectPath
 
 $editor = Join-Path $EngineRoot "Engine\Binaries\Win64\UnrealEditor.exe"
 $pipelinePy = Join-Path $EngineRoot "Plugins\PCGProfiler\Scripts\pcg_run_start_wait_finish.py"
-$log = "F:\Unreal Projects\ElectricDreamsEnv\Saved\Logs\pcg_start_wait_finish.log"
+$projectDir = Split-Path -Parent $ProjectPath
+$log = Join-Path $projectDir "Saved\Logs\pcg_start_wait_finish.log"
 
 if (-not (Test-Path $editor)) { throw "UnrealEditor.exe not found: $editor" }
 if (-not (Test-Path $ProjectPath)) { throw "uproject not found: $ProjectPath" }
@@ -32,3 +36,4 @@ if ($KeepOpen) {
     Write-Host "DONE: editor process exited"
     Write-Host "LOG=$log"
 }
+

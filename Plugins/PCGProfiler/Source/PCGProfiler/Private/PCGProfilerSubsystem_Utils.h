@@ -107,7 +107,29 @@ namespace PCGProfilerSerialization
         {
             return Value;
         }
+        FString StringValue;
+        if (Obj.IsValid() && Obj->TryGetStringField(Name, StringValue))
+        {
+            if (StringValue.IsNumeric())
+            {
+                return FCString::Atod(*StringValue);
+            }
+        }
         return DefaultValue;
+    }
+
+    static int64 GetInt64FieldOr(const TSharedPtr<FJsonObject>& Obj, const TCHAR* Name, int64 DefaultValue = 0)
+    {
+        const double Raw = GetNumberFieldOr(Obj, Name, static_cast<double>(DefaultValue));
+        if (Raw >= static_cast<double>(MAX_int64))
+        {
+            return MAX_int64;
+        }
+        if (Raw <= static_cast<double>(MIN_int64))
+        {
+            return MIN_int64;
+        }
+        return static_cast<int64>(Raw);
     }
 
     static FString GetStringFieldOr(const TSharedPtr<FJsonObject>& Obj, const TCHAR* Name, const FString& DefaultValue = FString())
@@ -155,8 +177,8 @@ namespace PCGProfilerSerialization
         OutEvent.FirstSeenTimeSource = GetStringFieldOr(Obj, TEXT("first_seen_time_source"), TEXT("chunk_replay"));
         OutEvent.InputCount = static_cast<int32>(GetNumberFieldOr(Obj, TEXT("input_count")));
         OutEvent.OutputCount = static_cast<int32>(GetNumberFieldOr(Obj, TEXT("output_count")));
-        OutEvent.InputPoints = static_cast<int64>(GetNumberFieldOr(Obj, TEXT("input_points")));
-        OutEvent.OutputPoints = static_cast<int64>(GetNumberFieldOr(Obj, TEXT("output_points")));
+        OutEvent.InputPoints = GetInt64FieldOr(Obj, TEXT("input_points"));
+        OutEvent.OutputPoints = GetInt64FieldOr(Obj, TEXT("output_points"));
         OutEvent.WarningCount = static_cast<int32>(GetNumberFieldOr(Obj, TEXT("warning_count")));
         OutEvent.ErrorCount = static_cast<int32>(GetNumberFieldOr(Obj, TEXT("error_count")));
         OutEvent.bCancelled = GetBoolFieldOr(Obj, TEXT("cancelled"));
@@ -168,11 +190,32 @@ namespace PCGProfilerSerialization
         OutEvent.PostExecuteMs = GetNumberFieldOr(Obj, TEXT("post_execute_ms"));
         OutEvent.bCacheHit = GetBoolFieldOr(Obj, TEXT("cache_hit"));
         OutEvent.CacheMissReason = GetStringFieldOr(Obj, TEXT("cache_miss_reason"));
-        OutEvent.MemoryBeforeBytes = static_cast<int64>(GetNumberFieldOr(Obj, TEXT("memory_before_bytes")));
-        OutEvent.MemoryAfterBytes = static_cast<int64>(GetNumberFieldOr(Obj, TEXT("memory_after_bytes")));
-        OutEvent.MemoryDeltaBytes = static_cast<int64>(GetNumberFieldOr(Obj, TEXT("memory_delta_bytes")));
+        OutEvent.MemoryBeforeBytes = GetInt64FieldOr(Obj, TEXT("memory_before_bytes"));
+        OutEvent.MemoryAfterBytes = GetInt64FieldOr(Obj, TEXT("memory_after_bytes"));
+        OutEvent.MemoryDeltaBytes = GetInt64FieldOr(Obj, TEXT("memory_delta_bytes"));
         OutEvent.MemoryMeasurementMode = GetStringFieldOr(Obj, TEXT("memory_measurement_mode"), TEXT("chunk_replay"));
         OutEvent.MemoryScope = GetStringFieldOr(Obj, TEXT("memory_scope"), TEXT("process_estimate"));
+        OutEvent.RunMode = GetStringFieldOr(Obj, TEXT("run_mode"), TEXT("editor"));
+        OutEvent.WorldType = GetStringFieldOr(Obj, TEXT("world_type"), TEXT("Editor"));
+        OutEvent.bIsPIE = GetBoolFieldOr(Obj, TEXT("is_pie"), false);
+        OutEvent.bIsCooked = GetBoolFieldOr(Obj, TEXT("is_cooked"), false);
+        OutEvent.CellId = GetStringFieldOr(Obj, TEXT("cell_id"));
+        OutEvent.StreamingEvent = GetStringFieldOr(Obj, TEXT("streaming_event"));
+        OutEvent.GenerateReason = GetStringFieldOr(Obj, TEXT("generate_reason"), TEXT("unknown"));
+        OutEvent.SpawnCount = static_cast<int32>(GetNumberFieldOr(Obj, TEXT("spawn_count")));
+        OutEvent.DestroyCount = static_cast<int32>(GetNumberFieldOr(Obj, TEXT("destroy_count")));
+        OutEvent.SpawnMs = GetNumberFieldOr(Obj, TEXT("spawn_ms"));
+        OutEvent.DestroyMs = GetNumberFieldOr(Obj, TEXT("destroy_ms"));
+
+        int32 MissingRequired = 0;
+        MissingRequired += Obj->HasField(TEXT("run_mode")) ? 0 : 1;
+        MissingRequired += Obj->HasField(TEXT("world_type")) ? 0 : 1;
+        MissingRequired += Obj->HasField(TEXT("input_points")) ? 0 : 1;
+        MissingRequired += Obj->HasField(TEXT("output_points")) ? 0 : 1;
+        if (MissingRequired > 0)
+        {
+            OutEvent.ThreadSource = FString::Printf(TEXT("%s|missing_required=%d"), *OutEvent.ThreadSource, MissingRequired);
+        }
         return true;
     }
 
@@ -197,7 +240,9 @@ namespace PCGProfilerSerialization
         EventObj->SetNumberField(TEXT("input_count"), Event.InputCount);
         EventObj->SetNumberField(TEXT("output_count"), Event.OutputCount);
         EventObj->SetNumberField(TEXT("input_points"), static_cast<double>(Event.InputPoints));
+        EventObj->SetStringField(TEXT("input_points_i64"), LexToString(Event.InputPoints));
         EventObj->SetNumberField(TEXT("output_points"), static_cast<double>(Event.OutputPoints));
+        EventObj->SetStringField(TEXT("output_points_i64"), LexToString(Event.OutputPoints));
         EventObj->SetNumberField(TEXT("estimated_memory_bytes"), static_cast<double>(PCGProfilerScaleStats::EstimateMemoryBytes(Event.InputPoints, Event.OutputPoints)));
         EventObj->SetNumberField(TEXT("warning_count"), Event.WarningCount);
         EventObj->SetNumberField(TEXT("error_count"), Event.ErrorCount);
@@ -211,11 +256,25 @@ namespace PCGProfilerSerialization
         EventObj->SetBoolField(TEXT("cache_hit"), Event.bCacheHit);
         EventObj->SetStringField(TEXT("cache_miss_reason"), Event.CacheMissReason);
         EventObj->SetNumberField(TEXT("memory_before_bytes"), static_cast<double>(Event.MemoryBeforeBytes));
+        EventObj->SetStringField(TEXT("memory_before_bytes_i64"), LexToString(Event.MemoryBeforeBytes));
         EventObj->SetNumberField(TEXT("memory_after_bytes"), static_cast<double>(Event.MemoryAfterBytes));
+        EventObj->SetStringField(TEXT("memory_after_bytes_i64"), LexToString(Event.MemoryAfterBytes));
         EventObj->SetNumberField(TEXT("memory_delta_bytes"), static_cast<double>(Event.MemoryDeltaBytes));
+        EventObj->SetStringField(TEXT("memory_delta_bytes_i64"), LexToString(Event.MemoryDeltaBytes));
         EventObj->SetStringField(TEXT("memory_measurement_mode"), Event.MemoryMeasurementMode);
         EventObj->SetStringField(TEXT("memory_scope"), Event.MemoryScope);
         EventObj->SetStringField(TEXT("data_type"), Event.DataType);
+        EventObj->SetStringField(TEXT("run_mode"), Event.RunMode);
+        EventObj->SetStringField(TEXT("world_type"), Event.WorldType);
+        EventObj->SetBoolField(TEXT("is_pie"), Event.bIsPIE);
+        EventObj->SetBoolField(TEXT("is_cooked"), Event.bIsCooked);
+        EventObj->SetStringField(TEXT("cell_id"), Event.CellId);
+        EventObj->SetStringField(TEXT("streaming_event"), Event.StreamingEvent);
+        EventObj->SetStringField(TEXT("generate_reason"), Event.GenerateReason);
+        EventObj->SetNumberField(TEXT("spawn_count"), Event.SpawnCount);
+        EventObj->SetNumberField(TEXT("destroy_count"), Event.DestroyCount);
+        EventObj->SetNumberField(TEXT("spawn_ms"), Event.SpawnMs);
+        EventObj->SetNumberField(TEXT("destroy_ms"), Event.DestroyMs);
         return EventObj;
     }
 }

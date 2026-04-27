@@ -1,12 +1,15 @@
 param(
-    [string]$EngineRoot = "F:\UnrealEngine-5.7.3-release",
-    [string]$ProjectPath = "F:\Unreal Projects\ElectricDreamsEnv\ElectricDreamsEnv.uproject",
+    [string]$EngineRoot = "",
+    [string]$ProjectPath = "",
     [string]$Map = "/Game/Levels/PCG/ElectricDreams_PCG",
     [int]$IterationsPerCase = 3,
     [switch]$UseNullRHI = $true
 )
 
 $ErrorActionPreference = "Stop"
+. (Join-Path $PSScriptRoot "PCGProfiler.ScriptCommon.ps1")
+$EngineRoot = Resolve-PCGProfilerEngineRoot -PreferredEngineRoot $EngineRoot
+$ProjectPath = Resolve-PCGProfilerProjectPath -PreferredProjectPath $ProjectPath
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 

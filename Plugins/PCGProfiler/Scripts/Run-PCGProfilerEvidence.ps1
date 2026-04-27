@@ -1,5 +1,5 @@
 param(
-    [string]$ProjectRoot = "F:\Unreal Projects\ElectricDreamsEnv",
+    [string]$ProjectRoot = "",
     [string]$InputJsonA = "",
     [string]$InputJsonB = "",
     [string]$OutputDir = ""
@@ -9,6 +9,15 @@ $ErrorActionPreference = "Stop"
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $OutputEncoding = [System.Text.UTF8Encoding]::new($false)
 $bAIsCurrentWhenBMissing = $false
+
+if (-not $ProjectRoot) {
+    $cwd = (Get-Location).Path
+    if (Test-Path -LiteralPath (Join-Path $cwd "Saved\Profiling\PCG")) {
+        $ProjectRoot = $cwd
+    } else {
+        throw "ProjectRoot is empty and could not be inferred from current working directory. Pass -ProjectRoot explicitly."
+    }
+}
 
 function Resolve-LatestJsonFiles {
     param([string]$RootDir)

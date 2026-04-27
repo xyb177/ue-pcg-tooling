@@ -318,4 +318,37 @@ struct FPCGProfilerNodeEvent
 
     UPROPERTY(VisibleAnywhere, Category="PCG Profiler")
     FString MemoryScope;
+
+    UPROPERTY(VisibleAnywhere, Category="PCG Profiler|Runtime")
+    FString RunMode;
+
+    UPROPERTY(VisibleAnywhere, Category="PCG Profiler|Runtime")
+    FString WorldType;
+
+    UPROPERTY(VisibleAnywhere, Category="PCG Profiler|Runtime")
+    bool bIsPIE = false;
+
+    UPROPERTY(VisibleAnywhere, Category="PCG Profiler|Runtime")
+    bool bIsCooked = false;
+
+    UPROPERTY(VisibleAnywhere, Category="PCG Profiler|Runtime")
+    FString CellId;
+
+    UPROPERTY(VisibleAnywhere, Category="PCG Profiler|Runtime")
+    FString StreamingEvent;
+
+    UPROPERTY(VisibleAnywhere, Category="PCG Profiler|Runtime")
+    FString GenerateReason;
+
+    UPROPERTY(VisibleAnywhere, Category="PCG Profiler|Runtime")
+    int32 SpawnCount = 0;
+
+    UPROPERTY(VisibleAnywhere, Category="PCG Profiler|Runtime")
+    int32 DestroyCount = 0;
+
+    UPROPERTY(VisibleAnywhere, Category="PCG Profiler|Runtime")
+    double SpawnMs = 0.0;
+
+    UPROPERTY(VisibleAnywhere, Category="PCG Profiler|Runtime")
+    double DestroyMs = 0.0;
 };

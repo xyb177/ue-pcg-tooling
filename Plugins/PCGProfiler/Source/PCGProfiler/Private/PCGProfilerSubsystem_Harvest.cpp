@@ -121,10 +121,6 @@ void UPCGProfilerSubsystem::FinalizeRunThreadSummary_NoLock()
     double P95Sum = 0.0;
     for (const FNodeP95Item& Item : P95Items)
     {
-        if (Item.SampleCount < 5)
-        {
-            continue;
-        }
         P95Sum += Item.P95Ms;
         ++Used;
         if (Used >= StableTopN)

@@ -552,6 +552,14 @@ bool FPCGProfilerExportJsonSchemaTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("JSON has thread_load"), RootObject->HasField(TEXT("thread_load")));
 	TestTrue(TEXT("JSON has cache_analysis"), RootObject->HasField(TEXT("cache_analysis")));
 	TestTrue(TEXT("JSON has scale_summary"), RootObject->HasField(TEXT("scale_summary")));
+	TestTrue(TEXT("JSON has run_mode"), RootObject->HasField(TEXT("run_mode")));
+	TestTrue(TEXT("JSON has world_type"), RootObject->HasField(TEXT("world_type")));
+	TestTrue(TEXT("JSON has map_name"), RootObject->HasField(TEXT("map_name")));
+	TestTrue(TEXT("JSON has map_path"), RootObject->HasField(TEXT("map_path")));
+	TestTrue(TEXT("JSON has component_generate_end_count"), RootObject->HasField(TEXT("component_generate_end_count")));
+	TestTrue(TEXT("JSON has component_cleanup_end_count"), RootObject->HasField(TEXT("component_cleanup_end_count")));
+	TestTrue(TEXT("JSON has component_generate_ms_total"), RootObject->HasField(TEXT("component_generate_ms_total")));
+	TestTrue(TEXT("JSON has component_cleanup_ms_total"), RootObject->HasField(TEXT("component_cleanup_ms_total")));
 
 	const TSharedPtr<FJsonObject>* ThreadLoad = nullptr;
 	TestTrue(TEXT("thread_load object exists"), RootObject->TryGetObjectField(TEXT("thread_load"), ThreadLoad) && ThreadLoad && ThreadLoad->IsValid());
@@ -623,12 +631,34 @@ bool FPCGProfilerExportJsonSchemaTest::RunTest(const FString& Parameters)
 	TestTrue(TEXT("Events array should be non-empty"), Events && Events->Num() > 0);
 	if (Events && Events->Num() > 0)
 	{
+		FString RootRunMode;
+		RootObject->TryGetStringField(TEXT("run_mode"), RootRunMode);
 		const TSharedPtr<FJsonObject> FirstEventObj = (*Events)[0]->AsObject();
 		TestTrue(TEXT("First event has input_points"), FirstEventObj.IsValid() && FirstEventObj->HasField(TEXT("input_points")));
 		TestTrue(TEXT("First event has output_points"), FirstEventObj.IsValid() && FirstEventObj->HasField(TEXT("output_points")));
 		TestTrue(TEXT("First event has estimated_memory_bytes"), FirstEventObj.IsValid() && FirstEventObj->HasField(TEXT("estimated_memory_bytes")));
 		TestTrue(TEXT("First event has prepare_data_ms"), FirstEventObj.IsValid() && FirstEventObj->HasField(TEXT("prepare_data_ms")));
 		TestTrue(TEXT("First event has post_execute_ms"), FirstEventObj.IsValid() && FirstEventObj->HasField(TEXT("post_execute_ms")));
+
+		int32 RunModeMismatchCount = 0;
+		for (const TSharedPtr<FJsonValue>& EventValue : *Events)
+		{
+			const TSharedPtr<FJsonObject> EventObj = EventValue.IsValid() ? EventValue->AsObject() : nullptr;
+			if (!EventObj.IsValid())
+			{
+				continue;
+			}
+			FString EventRunMode;
+			if (!EventObj->TryGetStringField(TEXT("run_mode"), EventRunMode))
+			{
+				continue;
+			}
+			if (!RootRunMode.IsEmpty() && EventRunMode != RootRunMode)
+			{
+				++RunModeMismatchCount;
+			}
+		}
+		TestEqual(TEXT("Event run_mode should match root run_mode in synthetic export"), RunModeMismatchCount, 0);
 	}
 
 	IPlatformFile& PlatformFile = FPlatformFileManager::Get().GetPlatformFile();
