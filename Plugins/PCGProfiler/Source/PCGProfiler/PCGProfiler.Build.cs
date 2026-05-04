@@ -17,6 +17,7 @@ public class PCGProfiler : ModuleRules
         PrivateDependencyModuleNames.AddRange(
             new string[]
             {
+                "DeveloperSettings",
                 "Json",
                 "JsonUtilities",
                 "Projects",

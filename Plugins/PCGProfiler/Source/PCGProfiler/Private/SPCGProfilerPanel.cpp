@@ -16,6 +16,7 @@
 #include "EngineUtils.h"
 #include "Components/PrimitiveComponent.h"
 #include "PCGComponent.h"
+#include "PCGProfilerSettings.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SSearchBox.h"
@@ -325,6 +326,13 @@ private:
 
 void SPCGProfilerPanel::Construct(const FArguments& InArgs)
 {
+    const UPCGProfilerSettings* Settings = GetDefault<UPCGProfilerSettings>();
+    if (Settings)
+    {
+        bAutoGenerateHtml = Settings->bAutoGenerateHtmlByDefault;
+        BatchIterationsText = FString::FromInt(Settings->DefaultBatchIterations);
+    }
+
     StatusText = TEXT("No run data loaded.");
     DiagnosticsText = TEXT("Diagnostics pending.");
     SelectionDetails = TEXT("Select a node to view details.");
@@ -1126,7 +1134,10 @@ FReply SPCGProfilerPanel::OnOneClickClicked()
 {
     if (UPCGProfilerSubsystem* Subsystem = GetSubsystem())
     {
-        Subsystem->RunOneClickProfile(600.0, 0.25, FString());
+        const UPCGProfilerSettings* Settings = GetDefault<UPCGProfilerSettings>();
+        const double Timeout = Settings ? Settings->OneClickTimeoutSeconds : 600.0;
+        const double Poll = Settings ? Settings->OneClickPollIntervalSeconds : 0.25;
+        Subsystem->RunOneClickProfile(Timeout, Poll, FString());
         bAutoArtifactPipelineActive = bAutoGenerateHtml;
         bBatchSummaryPending = false;
         bBatchSummaryLaunched = false;
@@ -1146,7 +1157,10 @@ FReply SPCGProfilerPanel::OnRunBatchClicked()
     if (UPCGProfilerSubsystem* Subsystem = GetSubsystem())
     {
         const int32 Iterations = FMath::Max(1, FCString::Atoi(*BatchIterationsText));
-        Subsystem->RunBatchProfile(Iterations, 600.0, 0.25);
+        const UPCGProfilerSettings* Settings = GetDefault<UPCGProfilerSettings>();
+        const double Timeout = Settings ? Settings->OneClickTimeoutSeconds : 600.0;
+        const double Poll = Settings ? Settings->OneClickPollIntervalSeconds : 0.25;
+        Subsystem->RunBatchProfile(Iterations, Timeout, Poll);
         bAutoArtifactPipelineActive = bAutoGenerateHtml;
         bBatchSummaryPending = true;
         bBatchSummaryLaunched = false;

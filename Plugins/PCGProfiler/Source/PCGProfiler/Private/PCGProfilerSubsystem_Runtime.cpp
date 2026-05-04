@@ -32,6 +32,7 @@
 #include "Data/PCGSpatialData.h"
 #include "Data/PCGSurfaceData.h"
 
+#include "PCGProfilerSettings.h"
 #include "PCGProfilerSubsystem_Internals.h"
 #include "PCGProfilerSubsystem_Utils.h"
 
@@ -44,6 +45,16 @@ int64 UPCGProfilerSubsystem::GetProcessMemoryBytes()
 void UPCGProfilerSubsystem::Initialize(FSubsystemCollectionBase& Collection)
 {
     Super::Initialize(Collection);
+
+    const UPCGProfilerSettings* Settings = GetDefault<UPCGProfilerSettings>();
+    if (Settings)
+    {
+        MemoryWarningThresholdBytes = static_cast<int64>(Settings->MemoryWarningThresholdGB * 1024.0 * 1024.0 * 1024.0);
+        MaxEventsInMemoryBeforeFlush = Settings->MaxEventsInMemoryBeforeFlush;
+        FlushChunkEventCount = Settings->FlushChunkEventCount;
+        bStrictCriticalPathMode = Settings->bStrictCriticalPathModeByDefault;
+    }
+
     if (!bRuntimeWorldDelegatesBound)
     {
         FWorldDelegates::LevelAddedToWorld.AddUObject(this, &UPCGProfilerSubsystem::HandleLevelAddedToWorld);
@@ -762,9 +773,13 @@ bool UPCGProfilerSubsystem::WaitForRunComplete(double TimeoutSeconds, double Pol
     const double SafePollIntervalSeconds = FMath::Max(0.001, PollIntervalSeconds);
     const double StartSeconds = FPlatformTime::Seconds();
 
+    const UPCGProfilerSettings* Settings = GetDefault<UPCGProfilerSettings>();
+    const double StableWindow = Settings ? Settings->StableWindowSeconds : 2.0;
+    const int32 IdleTicks = Settings ? Settings->RequiredIdleTicks : 3;
+
     while (true)
     {
-        if (IsRunConverged(2.0, 3))
+        if (IsRunConverged(StableWindow, IdleTicks))
         {
             return true;
         }
@@ -892,6 +907,15 @@ bool UPCGProfilerSubsystem::RunBatchProfile(int32 Iterations, double TimeoutSeco
     BatchPreStartLastComponentCount = -1;
     BatchPreStartComponentStableWindowSeconds = 3.0;
     BatchPreStartLastComponentChangeAtSeconds = 0.0;
+
+    const UPCGProfilerSettings* Settings = GetDefault<UPCGProfilerSettings>();
+    if (Settings)
+    {
+        BatchCooldownSeconds = Settings->BatchCooldownSeconds;
+        BatchPreStartMaxWaitSeconds = Settings->BatchPreStartMaxWaitSeconds;
+        BatchPreStartRequiredIdleTicks = Settings->BatchPreStartRequiredIdleTicks;
+        BatchPreStartComponentStableWindowSeconds = Settings->BatchPreStartComponentStableWindowSeconds;
+    }
     BatchPreStartWaitStartedAtSeconds = FPlatformTime::Seconds();
     int32 InitialComponentCount = 0;
     UWorld* LockedWorld = PCGProfilerRuntime::ResolvePrimaryPCGWorld(&InitialComponentCount);
@@ -993,7 +1017,11 @@ bool UPCGProfilerSubsystem::TickOneClickProfile(float DeltaTime)
         return false;
     }
 
-    const bool bIdle = IsRunConverged(2.0, 3);
+    const UPCGProfilerSettings* Settings = GetDefault<UPCGProfilerSettings>();
+    const double StableWindow = Settings ? Settings->StableWindowSeconds : 2.0;
+    const int32 IdleTicks = Settings ? Settings->RequiredIdleTicks : 3;
+
+    const bool bIdle = IsRunConverged(StableWindow, IdleTicks);
     const int32 ActiveComponentsNow = GetActivePCGComponentCount();
     if (ActiveComponentsNow > 0)
     {
@@ -1134,7 +1162,9 @@ void UPCGProfilerSubsystem::FinishOneClickProfile(const FString& Reason, bool bD
                     UWorld* CurrentWorld = PCGProfilerRuntime::ResolvePrimaryPCGWorld(&CurrentComponentCount);
                     const FString CurrentWorldPath = CurrentWorld ? CurrentWorld->GetPathName() : FString();
                     const int32 ActiveComponents = GetActivePCGComponentCount();
-                    const bool bIdle = IsRunConverged(2.0, BatchPreStartRequiredIdleTicks);
+                    const UPCGProfilerSettings* Settings = GetDefault<UPCGProfilerSettings>();
+                    const double StableWindow = Settings ? Settings->StableWindowSeconds : 2.0;
+                    const bool bIdle = IsRunConverged(StableWindow, BatchPreStartRequiredIdleTicks);
                     BatchPreStartIdleTicks = bIdle ? (BatchPreStartIdleTicks + 1) : 0;
 
                     if (BatchPreStartLastComponentCount != CurrentComponentCount)

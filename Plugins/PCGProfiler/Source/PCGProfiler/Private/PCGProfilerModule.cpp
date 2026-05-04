@@ -4,6 +4,7 @@
 #include "Framework/Docking/TabManager.h"
 #include "HAL/IConsoleManager.h"
 #include "Misc/DateTime.h"
+#include "PCGProfilerSettings.h"
 #include "PCGProfilerSubsystem.h"
 #include "SPCGProfilerPanel.h"
 #include "Widgets/Docking/SDockTab.h"
@@ -206,8 +207,11 @@ private:
     {
         if (UPCGProfilerSubsystem* Subsystem = GetSubsystem())
         {
-            const double TimeoutSeconds = Args.Num() > 0 ? FCString::Atod(*Args[0]) : 120.0;
-            const double PollIntervalSeconds = Args.Num() > 1 ? FCString::Atod(*Args[1]) : 0.05;
+            const UPCGProfilerSettings* Settings = GetDefault<UPCGProfilerSettings>();
+            const double DefaultTimeout = Settings ? Settings->WaitForRunCompleteTimeoutSeconds : 120.0;
+            const double DefaultPoll = Settings ? Settings->WaitForRunCompletePollIntervalSeconds : 0.05;
+            const double TimeoutSeconds = Args.Num() > 0 ? FCString::Atod(*Args[0]) : DefaultTimeout;
+            const double PollIntervalSeconds = Args.Num() > 1 ? FCString::Atod(*Args[1]) : DefaultPoll;
             const bool bCompleted = Subsystem->WaitForRunComplete(TimeoutSeconds, PollIntervalSeconds);
             const int32 ActiveCount = Subsystem->GetActivePCGComponentCount();
             UE_LOG(LogTemp, Display, TEXT("PCGProfiler WaitForRunComplete: %s (active_components=%d, timeout=%.3fs, poll=%.3fs)"),
@@ -222,9 +226,13 @@ private:
     {
         if (UPCGProfilerSubsystem* Subsystem = GetSubsystem())
         {
-            const int32 Iterations = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : 10;
-            const double TimeoutSeconds = Args.Num() > 1 ? FCString::Atod(*Args[1]) : 600.0;
-            const double PollIntervalSeconds = Args.Num() > 2 ? FCString::Atod(*Args[2]) : 0.25;
+            const UPCGProfilerSettings* Settings = GetDefault<UPCGProfilerSettings>();
+            const int32 DefaultIterations = Settings ? Settings->DefaultBatchIterations : 10;
+            const double DefaultTimeout = Settings ? Settings->OneClickTimeoutSeconds : 600.0;
+            const double DefaultPoll = Settings ? Settings->OneClickPollIntervalSeconds : 0.25;
+            const int32 Iterations = Args.Num() > 0 ? FCString::Atoi(*Args[0]) : DefaultIterations;
+            const double TimeoutSeconds = Args.Num() > 1 ? FCString::Atod(*Args[1]) : DefaultTimeout;
+            const double PollIntervalSeconds = Args.Num() > 2 ? FCString::Atod(*Args[2]) : DefaultPoll;
             const bool bStarted = Subsystem->RunBatchProfile(Iterations, TimeoutSeconds, PollIntervalSeconds);
             UE_LOG(LogTemp, Display, TEXT("PCGProfiler RunBatch start: %s (iterations=%d timeout=%.3fs poll=%.3fs)"),
                 bStarted ? TEXT("true") : TEXT("false"),
@@ -324,7 +332,10 @@ private:
     {
         if (UPCGProfilerSubsystem* Subsystem = GetSubsystem())
         {
-            const bool bStarted = Subsystem->RunOneClickProfile(600.0, 0.25, FString());
+            const UPCGProfilerSettings* Settings = GetDefault<UPCGProfilerSettings>();
+            const double Timeout = Settings ? Settings->OneClickTimeoutSeconds : 600.0;
+            const double Poll = Settings ? Settings->OneClickPollIntervalSeconds : 0.25;
+            const bool bStarted = Subsystem->RunOneClickProfile(Timeout, Poll, FString());
             UE_LOG(LogTemp, Display, TEXT("PCGProfiler Tools menu one-click start: %s"), bStarted ? TEXT("true") : TEXT("false"));
         }
     }
@@ -333,8 +344,12 @@ private:
     {
         if (UPCGProfilerSubsystem* Subsystem = GetSubsystem())
         {
-            const bool bStarted = Subsystem->RunBatchProfile(10, 600.0, 0.25);
-            UE_LOG(LogTemp, Display, TEXT("PCGProfiler Tools menu batch x10 start: %s"), bStarted ? TEXT("true") : TEXT("false"));
+            const UPCGProfilerSettings* Settings = GetDefault<UPCGProfilerSettings>();
+            const int32 Iterations = Settings ? Settings->DefaultBatchIterations : 10;
+            const double Timeout = Settings ? Settings->OneClickTimeoutSeconds : 600.0;
+            const double Poll = Settings ? Settings->OneClickPollIntervalSeconds : 0.25;
+            const bool bStarted = Subsystem->RunBatchProfile(Iterations, Timeout, Poll);
+            UE_LOG(LogTemp, Display, TEXT("PCGProfiler Tools menu batch x%d start: %s"), Iterations, bStarted ? TEXT("true") : TEXT("false"));
         }
     }
 
@@ -372,7 +387,10 @@ private:
         const int32 Iterations = FMath::Max(1, FCString::Atoi(*Raw));
         if (UPCGProfilerSubsystem* Subsystem = GetSubsystem())
         {
-            const bool bStarted = Subsystem->RunBatchProfile(Iterations, 600.0, 0.25);
+            const UPCGProfilerSettings* Settings = GetDefault<UPCGProfilerSettings>();
+            const double Timeout = Settings ? Settings->OneClickTimeoutSeconds : 600.0;
+            const double Poll = Settings ? Settings->OneClickPollIntervalSeconds : 0.25;
+            const bool bStarted = Subsystem->RunBatchProfile(Iterations, Timeout, Poll);
             UE_LOG(LogTemp, Display, TEXT("PCGProfiler Tools menu batch prompt start: %s (iterations=%d)"),
                 bStarted ? TEXT("true") : TEXT("false"),
                 Iterations);
