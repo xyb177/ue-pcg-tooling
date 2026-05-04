@@ -4,32 +4,11 @@
 
 #include "PCGContext.h"
 #include "Data/PCGPointData.h"
+#include "Helpers/PCGCircleHelpers.h"
 #include "Helpers/PCGHelpers.h"
 #include "Serialization/ArchiveCrc32.h"
 
 #include UE_INLINE_GENERATED_CPP_BY_NAME(PCGCircleData)
-
-namespace
-{
-	static constexpr float FullCircleAngle = 2.0f * UE_PI;
-
-	static FTransform GetTransformWithoutScale(const FTransform& InTransform)
-	{
-		return FTransform(InTransform.GetRotation(), InTransform.GetLocation(), FVector::OneVector);
-	}
-
-	static float NormalizeAngle(float InAngle, float InFullAngle)
-	{
-		const float SafeFullAngle = FMath::Max(InFullAngle, UE_KINDA_SMALL_NUMBER);
-		float Wrapped = FMath::Fmod(InAngle, SafeFullAngle);
-		if (Wrapped < 0.0f)
-		{
-			Wrapped += SafeFullAngle;
-		}
-
-		return Wrapped;
-	}
-}
 
 PCG_DEFINE_TYPE_INFO(FPCGDataTypeInfoCircle, UPCGCircleData)
 
@@ -43,20 +22,20 @@ void UPCGCircleData::Initialize(const UCircleComponent* InCircleComponent)
 	check(InCircleComponent);
 
 	Initialize(
-		GetTransformWithoutScale(InCircleComponent->GetComponentTransform()),
+		PCGCircleHelpers::GetTransformWithoutScale(InCircleComponent->GetComponentTransform()),
 		FMath::Max(InCircleComponent->GetRadius(), UE_KINDA_SMALL_NUMBER),
-		FMath::Clamp(InCircleComponent->FullAngle, UE_KINDA_SMALL_NUMBER, FullCircleAngle),
+		FMath::Clamp(InCircleComponent->FullAngle, UE_KINDA_SMALL_NUMBER, PCGCircleHelpers::FullCircleAngle),
 		FMath::Max(InCircleComponent->GetNumberOfCircleSegments(), 3),
 		InCircleComponent->IsClosedLoop());
 }
 
 void UPCGCircleData::Initialize(const FTransform& InTransform, float InRadius, float InFullAngle, int32 InResolution, bool bInClosedLoop)
 {
-	Transform = GetTransformWithoutScale(InTransform);
+	Transform = PCGCircleHelpers::GetTransformWithoutScale(InTransform);
 	Radius = FMath::Max(InRadius, UE_KINDA_SMALL_NUMBER);
-	FullAngle = FMath::Clamp(InFullAngle, UE_KINDA_SMALL_NUMBER, FullCircleAngle);
+	FullAngle = FMath::Clamp(InFullAngle, UE_KINDA_SMALL_NUMBER, PCGCircleHelpers::FullCircleAngle);
 	Resolution = FMath::Max(InResolution, 3);
-	bClosedLoop = bInClosedLoop && FMath::IsNearlyEqual(FullAngle, FullCircleAngle);
+	bClosedLoop = bInClosedLoop && FMath::IsNearlyEqual(FullAngle, PCGCircleHelpers::FullCircleAngle);
 }
 
 void UPCGCircleData::AddToCrc(FArchiveCrc32& Ar, bool bFullDataCrc) const
@@ -80,14 +59,14 @@ FBox UPCGCircleData::GetBounds() const
 
 bool UPCGCircleData::ProjectToCircle(const FVector& InWorldPosition, FVector& OutProjectedWorldPosition, float& OutAlpha, float& OutDistance) const
 {
-	const FVector LocalPosition = GetTransformWithoutScale(Transform).InverseTransformPosition(InWorldPosition);
+	const FVector LocalPosition = PCGCircleHelpers::GetTransformWithoutScale(Transform).InverseTransformPosition(InWorldPosition);
 	const FVector LocalXY(LocalPosition.X, LocalPosition.Y, 0.0f);
 	const float Angle = FMath::Atan2(LocalXY.Y, LocalXY.X);
-	const float SafeAngle = bClosedLoop ? NormalizeAngle(Angle, FullAngle) : FMath::Clamp(Angle, 0.0f, FullAngle);
+	const float SafeAngle = bClosedLoop ? PCGCircleHelpers::NormalizeAngle(Angle, FullAngle) : FMath::Clamp(Angle, 0.0f, FullAngle);
 	const float Alpha = SafeAngle / FMath::Max(FullAngle, UE_KINDA_SMALL_NUMBER);
 	const FVector LocalProjected(FMath::Cos(SafeAngle) * Radius, FMath::Sin(SafeAngle) * Radius, 0.0f);
 
-	OutProjectedWorldPosition = GetTransformWithoutScale(Transform).TransformPosition(LocalProjected);
+	OutProjectedWorldPosition = PCGCircleHelpers::GetTransformWithoutScale(Transform).TransformPosition(LocalProjected);
 	OutAlpha = Alpha;
 	OutDistance = (LocalPosition - LocalProjected).Size();
 	return true;
@@ -155,7 +134,8 @@ const UPCGPointData* UPCGCircleData::CreatePointData(FPCGContext* Context) const
 	TArray<FPCGPoint>& Points = PointData->GetMutablePoints();
 	for (int32 PointIndex = 0; PointIndex < NumPoints; ++PointIndex)
 	{
-		const float Alpha = bClosedLoop ? static_cast<float>(PointIndex) / static_cast<float>(Resolution) : static_cast<float>(PointIndex) / static_cast<float>(Resolution);
+		// Same denominator for both paths; the point count (NumPoints) already differs between closed/open
+			const float Alpha = static_cast<float>(PointIndex) / static_cast<float>(Resolution);
 		Points[PointIndex].Transform = GetTransformAtAlpha(Alpha);
 		Points[PointIndex].Density = 1.0f;
 		Points[PointIndex].SetLocalBounds(FBox(EForceInit::ForceInit));
@@ -267,7 +247,7 @@ FVector UPCGCircleData::GetLocalNormal() const
 
 FTransform UPCGCircleData::MakeTransformAtAngle(float InAngle, bool bWorldSpace) const
 {
-	const float SafeAngle = bClosedLoop ? NormalizeAngle(InAngle, FullAngle) : FMath::Clamp(InAngle, 0.0f, FullAngle);
+	const float SafeAngle = bClosedLoop ? PCGCircleHelpers::NormalizeAngle(InAngle, FullAngle) : FMath::Clamp(InAngle, 0.0f, FullAngle);
 	const FVector LocalPosition(FMath::Cos(SafeAngle) * Radius, FMath::Sin(SafeAngle) * Radius, 0.0f);
 	const FVector LocalTangent(-FMath::Sin(SafeAngle), FMath::Cos(SafeAngle), 0.0f);
 	const FVector LocalNormal(0.0f, 0.0f, 1.0f);

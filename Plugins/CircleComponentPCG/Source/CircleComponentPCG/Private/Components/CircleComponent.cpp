@@ -120,10 +120,8 @@ int32 ConvertCircleShapeTypeToInt(ECircleShapeType::Type ShapeType)
 	}
 }
 
-void FCircleCurves::UpdateCircle(float InRadius, int32 InSegments, const FVector& InScale)
+void FCircleCurves::UpdateCircle(float InRadius, int32 InSegments)
 {
-	(void)InScale;
-
 	const int32 SafeSegments = FMath::Max(InSegments, 3);
 	const float SafeRadius = FMath::Max(InRadius, UE_KINDA_SMALL_NUMBER);
 
@@ -138,16 +136,12 @@ void FCircleCurves::UpdateCircle(float InRadius, int32 InSegments, const FVector
 		const float Alpha = static_cast<float>(Index) / static_cast<float>(SafeSegments);
 		const float Angle = Alpha * UE::CircleComponent::FullCircleAngle;
 
-		const FVector LocalPos = UE::CircleComponent::ComputePosition(SafeRadius, Angle);
-		const FVector LocalTan = UE::CircleComponent::ComputeTangent(Angle);
-		const FVector LocalNormal = LocalPos.GetSafeNormal();
+		Positions.Add(UE::CircleComponent::ComputePosition(SafeRadius, Angle));
+		Tangents.Add(UE::CircleComponent::ComputeTangent(Angle));
+		Normals.Add(UE::CircleComponent::ComputePosition(SafeRadius, Angle).GetSafeNormal());
 
-		Positions.Add(LocalPos * InScale);
-		Tangents.Add(LocalTan * InScale);
-		Normals.Add(LocalNormal);
-
+		AccumulatedArcLength = SafeRadius * Angle;
 		ArcLengthTable.Points.Emplace(Angle, AccumulatedArcLength, 0.0f, 0.0f, CIM_Linear);
-		AccumulatedArcLength = (Alpha + (1.0f / static_cast<float>(SafeSegments))) * UE::CircleComponent::FullCircleAngle * SafeRadius;
 	}
 
 	ArcLengthTable.Points.Emplace(UE::CircleComponent::FullCircleAngle, UE::CircleComponent::FullCircleAngle * SafeRadius, 0.0f, 0.0f, CIM_Linear);
@@ -331,7 +325,7 @@ TStructOnScope<FActorComponentInstanceData> UCircleComponent::GetComponentInstan
 	CircleData->bCircleHasBeenEdited = bCircleHasBeenEdited;
 	CircleData->Params = Params;
 	CircleData->CircleCurves = CircleCurves;
-	CircleData->bClosedLoop = bClosedLoop;
+	CircleData->bClosedLoop = IsClosedLoop();
 	CircleData->FullAngle = FullAngle;
 	return InstanceData;
 }
@@ -499,8 +493,41 @@ void UCircleComponent::PushSelectionToProxy()
 
 FBoxSphereBounds UCircleComponent::CalcBounds(const FTransform& LocalToWorld) const
 {
-	const float Radius = FMath::Max(GetRadius(), UE_KINDA_SMALL_NUMBER);
-	return FBoxSphereBounds(FSphere(FVector::ZeroVector, Radius).TransformBy(UE::CircleComponent::GetTransformWithoutScale(LocalToWorld)));
+	const float EffectiveRadius = FMath::Max(GetRadius(), UE_KINDA_SMALL_NUMBER);
+	const float SafeFullAngle = FMath::Clamp(FullAngle, UE_KINDA_SMALL_NUMBER, UE::CircleComponent::FullCircleAngle);
+
+	// Full circle: use sphere bounds for simplicity
+	if (FMath::IsNearlyEqual(SafeFullAngle, UE::CircleComponent::FullCircleAngle, UE::CircleComponent::FullCircleAngleTolerance))
+	{
+		return FBoxSphereBounds(FSphere(FVector::ZeroVector, EffectiveRadius).TransformBy(UE::CircleComponent::GetTransformWithoutScale(LocalToWorld)));
+	}
+
+	// Arc: compute axis-aligned bounding box from the arc extent
+	const float MinAngle = 0.0f;
+	const float MaxAngle = SafeFullAngle;
+
+	// Collect candidate extremal points: start, end, and any quadrant boundary crossings
+	TArray<FVector, TInlineAllocator<8>> Candidates;
+	Candidates.Add(UE::CircleComponent::ComputePosition(EffectiveRadius, MinAngle));
+	Candidates.Add(UE::CircleComponent::ComputePosition(EffectiveRadius, MaxAngle));
+
+	// Include quadrant boundaries (0, π/2, π, 3π/2) if they lie within the arc
+	constexpr float HalfPi = UE_PI * 0.5f;
+	for (float Boundary : {HalfPi, UE_PI, 3.0f * HalfPi})
+	{
+		if (Boundary > MinAngle && Boundary < MaxAngle)
+		{
+			Candidates.Add(UE::CircleComponent::ComputePosition(EffectiveRadius, Boundary));
+		}
+	}
+
+	FBox LocalBox(ForceInit);
+	for (const FVector& Candidate : Candidates)
+	{
+		LocalBox += Candidate;
+	}
+
+	return FBoxSphereBounds(LocalBox.TransformBy(UE::CircleComponent::GetTransformWithoutScale(LocalToWorld)));
 }
 
 FCircleParams UCircleComponent::GetCircleParams() const
@@ -515,7 +542,7 @@ void UCircleComponent::SetCircleParams(const FCircleParams& InParams)
 	SyncRelativeScaleFromRadius();
 }
 
-FCircleCurves UCircleComponent::GetCircleCurves() const
+const FCircleCurves& UCircleComponent::GetCircleCurves() const
 {
 	return CircleCurves;
 }
@@ -530,30 +557,6 @@ int32 UCircleComponent::GetVersion() const
 	return static_cast<int32>(CircleCurves.Version);
 }
 
-TArray<ECircleShapeType::Type> UCircleComponent::GetEnabledCircleShapeTypes() const
-{
-	return { ECircleShapeType::Wire, ECircleShapeType::Solid, ECircleShapeType::ThickWire };
-}
-
-void UCircleComponent::ApplyComponentInstanceData(FCircleInstanceData* ComponentInstanceData, const bool bPostUCS)
-{
-	if (ComponentInstanceData == nullptr)
-	{
-		return;
-	}
-
-	bCircleHasBeenEdited = ComponentInstanceData->bCircleHasBeenEdited;
-	SetCircleParams(ComponentInstanceData->Params);
-	CircleCurves = ComponentInstanceData->CircleCurves;
-	bClosedLoop = ComponentInstanceData->bClosedLoop;
-	FullAngle = ComponentInstanceData->FullAngle;
-	if (bPostUCS)
-	{
-		EnforceLockedUniformScale(false);
-		UpdateCircle();
-	}
-}
-
 void UCircleComponent::ApplyComponentInstanceData(FCircleComponentInstanceData* ComponentInstanceData, const bool bPostUCS)
 {
 	if (ComponentInstanceData == nullptr)
@@ -564,7 +567,6 @@ void UCircleComponent::ApplyComponentInstanceData(FCircleComponentInstanceData* 
 	bCircleHasBeenEdited = ComponentInstanceData->bCircleHasBeenEdited;
 	SetCircleParams(ComponentInstanceData->Params);
 	CircleCurves = ComponentInstanceData->CircleCurves;
-	bClosedLoop = ComponentInstanceData->bClosedLoop;
 	FullAngle = ComponentInstanceData->FullAngle;
 	if (bPostUCS)
 	{
@@ -617,13 +619,11 @@ void UCircleComponent::UpdateCircle()
 	Params.Segments = FMath::Max(Params.Segments, 3);
 	CircleParams = Params;
 	FullAngle = FMath::Clamp(FullAngle, UE_KINDA_SMALL_NUMBER, UE::CircleComponent::FullCircleAngle);
-	bClosedLoop = FullAngle >= (UE::CircleComponent::FullCircleAngle - UE_KINDA_SMALL_NUMBER);
 
-	CircleCurves.UpdateCircle(Params.Radius, Params.Segments, FVector(1.0f));
+	CircleCurves.UpdateCircle(Params.Radius, Params.Segments);
 
 	MARK_PROPERTY_DIRTY_FROM_NAME(UCircleComponent, Params, this);
 	MARK_PROPERTY_DIRTY_FROM_NAME(UCircleComponent, CircleCurves, this);
-	MARK_PROPERTY_DIRTY_FROM_NAME(UCircleComponent, bClosedLoop, this);
 	MARK_PROPERTY_DIRTY_FROM_NAME(UCircleComponent, bCircleHasBeenEdited, this);
 
 #if UE_ENABLE_DEBUG_DRAWING
@@ -711,31 +711,37 @@ void UCircleComponent::SetOverrideConstructionScript(bool InOverride)
 	bCircleHasBeenEdited = InOverride;
 }
 
-FVector UCircleComponent::GetLocationAtAngle(float InAngle, bool bInWorldSpace) const
+void UCircleComponent::ComputeCircleGeometryAtAngle(float InAngle, FVector& OutPosition, FVector& OutTangent, FVector& OutNormal) const
 {
 	const float SafeFullAngle = FMath::Max(FullAngle, UE_KINDA_SMALL_NUMBER);
 	const float EvaluationAngle = UE::CircleComponent::ResolveEvaluationAngle(InAngle, SafeFullAngle, IsClosedLoop());
 	const float CircleAngle = (EvaluationAngle / SafeFullAngle) * UE::CircleComponent::FullCircleAngle;
-	const FVector Local = UE::CircleComponent::ComputePosition(GetRadius(), CircleAngle);
-	return bInWorldSpace ? UE::CircleComponent::GetTransformWithoutScale(GetComponentTransform()).TransformPosition(Local) : Local;
+	const float R = GetRadius();
+
+	OutPosition = UE::CircleComponent::ComputePosition(R, CircleAngle);
+	OutTangent  = UE::CircleComponent::ComputeTangent(CircleAngle).GetSafeNormal();
+	OutNormal   = UE::CircleComponent::ComputePosition(1.0f, CircleAngle).GetSafeNormal();
+}
+
+FVector UCircleComponent::GetLocationAtAngle(float InAngle, bool bInWorldSpace) const
+{
+	FVector Position, Tangent, Normal;
+	ComputeCircleGeometryAtAngle(InAngle, Position, Tangent, Normal);
+	return bInWorldSpace ? UE::CircleComponent::GetTransformWithoutScale(GetComponentTransform()).TransformPosition(Position) : Position;
 }
 
 FVector UCircleComponent::GetTangentAtAngle(float InAngle, bool bInWorldSpace) const
 {
-	const float SafeFullAngle = FMath::Max(FullAngle, UE_KINDA_SMALL_NUMBER);
-	const float EvaluationAngle = UE::CircleComponent::ResolveEvaluationAngle(InAngle, SafeFullAngle, IsClosedLoop());
-	const float CircleAngle = (EvaluationAngle / SafeFullAngle) * UE::CircleComponent::FullCircleAngle;
-	const FVector Local = UE::CircleComponent::ComputeTangent(CircleAngle).GetSafeNormal();
-	return bInWorldSpace ? GetComponentTransform().TransformVectorNoScale(Local).GetSafeNormal() : Local;
+	FVector Position, Tangent, Normal;
+	ComputeCircleGeometryAtAngle(InAngle, Position, Tangent, Normal);
+	return bInWorldSpace ? GetComponentTransform().TransformVectorNoScale(Tangent).GetSafeNormal() : Tangent;
 }
 
 FVector UCircleComponent::GetNormalAtAngle(float InAngle, bool bInWorldSpace) const
 {
-	const float SafeFullAngle = FMath::Max(FullAngle, UE_KINDA_SMALL_NUMBER);
-	const float EvaluationAngle = UE::CircleComponent::ResolveEvaluationAngle(InAngle, SafeFullAngle, IsClosedLoop());
-	const float CircleAngle = (EvaluationAngle / SafeFullAngle) * UE::CircleComponent::FullCircleAngle;
-	const FVector Local = UE::CircleComponent::ComputePosition(1.0f, CircleAngle).GetSafeNormal();
-	return bInWorldSpace ? GetComponentTransform().TransformVectorNoScale(Local).GetSafeNormal() : Local;
+	FVector Position, Tangent, Normal;
+	ComputeCircleGeometryAtAngle(InAngle, Position, Tangent, Normal);
+	return bInWorldSpace ? GetComponentTransform().TransformVectorNoScale(Normal).GetSafeNormal() : Normal;
 }
 
 int32 UCircleComponent::GetNumberOfCircleSegments() const
@@ -752,11 +758,15 @@ FCirclePoint UCircleComponent::GetCirclePointAtAngle(float InAngle, bool bInWorl
 {
 	const float SafeFullAngle = FMath::Max(FullAngle, UE_KINDA_SMALL_NUMBER);
 	const float EvaluationAngle = UE::CircleComponent::ResolveEvaluationAngle(InAngle, SafeFullAngle, IsClosedLoop());
+
+	FVector Position, Tangent, Normal;
+	ComputeCircleGeometryAtAngle(InAngle, Position, Tangent, Normal);
+
 	return FCirclePoint(
 		EvaluationAngle,
-		GetLocationAtAngle(InAngle, bInWorldSpace),
-		GetTangentAtAngle(InAngle, bInWorldSpace),
-		GetNormalAtAngle(InAngle, bInWorldSpace));
+		bInWorldSpace ? UE::CircleComponent::GetTransformWithoutScale(GetComponentTransform()).TransformPosition(Position) : Position,
+		bInWorldSpace ? GetComponentTransform().TransformVectorNoScale(Tangent).GetSafeNormal() : Tangent,
+		bInWorldSpace ? GetComponentTransform().TransformVectorNoScale(Normal).GetSafeNormal() : Normal);
 }
 
 float UCircleComponent::GetCircleCircumference() const
@@ -773,10 +783,14 @@ void UCircleComponent::SetDrawDebug(bool bShow)
 
 void UCircleComponent::SetClosedLoop(bool bInClosedLoop, bool bUpdateCircle)
 {
-	bClosedLoop = bInClosedLoop;
-	if (bClosedLoop)
+	if (bInClosedLoop)
 	{
 		FullAngle = UE::CircleComponent::FullCircleAngle;
+	}
+	else
+	{
+		// Non-closed: clamp to at most 2π - epsilon so the derivative below stays correct
+		FullAngle = FMath::Clamp(FullAngle, UE_KINDA_SMALL_NUMBER, UE::CircleComponent::FullCircleAngle - UE_KINDA_SMALL_NUMBER);
 	}
 
 	if (bUpdateCircle)
@@ -787,7 +801,7 @@ void UCircleComponent::SetClosedLoop(bool bInClosedLoop, bool bUpdateCircle)
 
 bool UCircleComponent::IsClosedLoop() const
 {
-	return bClosedLoop;
+	return FMath::IsNearlyEqual(FullAngle, UE::CircleComponent::FullCircleAngle, UE::CircleComponent::FullCircleAngleTolerance);
 }
 
 void UCircleComponent::SetRadius(float NewRadius, bool bUpdateCircle)
@@ -846,15 +860,6 @@ const TArray<FVector>& UCircleComponent::GetCircleTangents() const
 const TArray<FVector>& UCircleComponent::GetCircleNormals() const
 {
 	return CircleCurves.Normals;
-}
-
-bool UCircleComponent::Validate() const
-{
-	const bool bValidRadius = Params.Radius > 0.0f;
-	const bool bValidSegments = Params.Segments >= 3;
-	const bool bCurvesConsistent = CircleCurves.Positions.Num() == CircleCurves.Tangents.Num()
-		&& CircleCurves.Positions.Num() == CircleCurves.Normals.Num();
-	return bValidRadius && bValidSegments && bCurvesConsistent;
 }
 
 void UCircleComponent::SetDefaultCircle()

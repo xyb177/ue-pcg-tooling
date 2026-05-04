@@ -109,9 +109,9 @@ struct FCircleCurves
 	UPROPERTY()
 	FInterpCurveFloat ArcLengthTable;
 
-	/** Version number for tracking updates */
+	/** Version number for tracking updates. Incremented on every UpdateCircle call. */
 	UPROPERTY(transient)
-	uint32 Version = 0xffffffff;
+	uint64 Version = 0;
 
 	bool operator==(const FCircleCurves& Other) const
 	{
@@ -129,7 +129,7 @@ struct FCircleCurves
 	 * @param InSegments Number of segments
 	 * @param InScale Deprecated and ignored. Kept for compatibility.
 	 */
-	CIRCLECOMPONENTPCG_API void UpdateCircle(float InRadius, int32 InSegments, const FVector& InScale = FVector(1.0f));
+	CIRCLECOMPONENTPCG_API void UpdateCircle(float InRadius, int32 InSegments);
 
 	/** Returns circle circumference */
 	CIRCLECOMPONENTPCG_API float GetCircleCircumference() const;
@@ -179,7 +179,7 @@ public:
 	int32 StepsPerSegment;
 
 	/** Specifies the full angle of the circle. Stored in radians and displayed in degrees in the editor. */
-	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Circle, meta=(DisplayName="Full Angle(完整角度)", ForceUnits="degrees", ClampMin="0.0", UIMin="0.0", ClampMax="360.0", UIMax="360.0"))
+	UPROPERTY(EditAnywhere, BlueprintReadWrite, Category=Circle, meta=(DisplayName="Full Angle(完整角度)", ForceUnits="deg", ClampMin="0.0", UIMin="0.0", ClampMax="360.0", UIMax="360.0"))
 	float FullAngle;
 
 	/** Whether the circle has been edited from its default by the circle component visualizer */
@@ -206,7 +206,7 @@ private:
 	 * Whether the circle is to be considered as a closed loop.
 	 * Use SetClosedLoop() to set this property, and IsClosedLoop() to read it.
 	 */
-	UPROPERTY(EditAnywhere, Replicated, Category = Circle, meta=(DisplayName="Closed Loop(闭环)"))
+	UPROPERTY(Replicated, Category = Circle, meta=(DisplayName="Closed Loop(闭环)"))
 	bool bClosedLoop;
 
 	/** Material used for rendering circle segments. */
@@ -292,20 +292,16 @@ public:
 	void SetCircleParams(const FCircleParams& InParams);
 
 	// Safe for caching circle curves data
-	FCircleCurves GetCircleCurves() const;
+	const FCircleCurves& GetCircleCurves() const;
 	void SetCircleCurves(const FCircleCurves& InCircleCurves);
 
 	int32 GetVersion() const;
-
-	/** Get the enabled Circle Shape types for this circle component. */
-	virtual TArray<ECircleShapeType::Type> GetEnabledCircleShapeTypes() const;
 
 	/** Controls the visibility of the Circle radius editor in the details panel. */
 	virtual bool AllowsCircleRadiusEditing() const { return true; }
 	/** Controls the visibility of the Circle segments editor in the details panel. */
 	virtual bool AllowsCircleSegmentsEditing() const { return true; }
 
-	void ApplyComponentInstanceData(struct FCircleInstanceData* ComponentInstanceData, const bool bPostUCS);
 	void ApplyComponentInstanceData(struct FCircleComponentInstanceData* ComponentInstanceData, const bool bPostUCS);
 	
 	/** Reset the circle to its default shape (a circle with default params) */
@@ -525,7 +521,6 @@ protected:
 private:
 	
 	/** Checks for consistency between CircleParams and internal state. */
-	bool Validate() const;
 	void EnforceLockedUniformScale(bool bForceWarning = false);
 	void SyncRadiusFromRelativeScale();
 	void SyncRelativeScaleFromRadius();
@@ -533,55 +528,12 @@ private:
 	/** Set the CircleParams with the default shape (Used by default constructor) */
 	void SetDefaultCircle();
 
+	/** Compute position/tangent/normal at an angle in a single pass — avoids redundant ResolveEvaluationAngle. */
+	void ComputeCircleGeometryAtAngle(float InAngle, FVector& OutPosition, FVector& OutTangent, FVector& OutNormal) const;
+
 	bool bIsSynchronizingScaleAndRadius = false;
 
 	// friend class FCircleComponentVisualizer;
-};
-
-/** Used to store circle data during RerunConstructionScripts */
-USTRUCT()
-struct FCircleInstanceData : public FSceneComponentInstanceData
-{
-	GENERATED_BODY()
-public:
-	FCircleInstanceData()
-		: bCircleHasBeenEdited(false)
-	{}
-	explicit FCircleInstanceData(const UCircleComponent* SourceComponent)
-		: FSceneComponentInstanceData(SourceComponent)
-		, bCircleHasBeenEdited(false)
-		, Params(SourceComponent->GetCircleParams())
-		, CircleCurves(SourceComponent->GetCircleCurves())
-		, bClosedLoop(SourceComponent->IsClosedLoop())
-		, FullAngle(SourceComponent->FullAngle)
-	{}
-	virtual ~FCircleInstanceData() = default;
-
-	virtual bool ContainsData() const override
-	{
-		return Super::ContainsData() || bCircleHasBeenEdited;
-	}
-
-	virtual void ApplyToComponent(UActorComponent* Component, const ECacheApplyPhase CacheApplyPhase) override
-	{
-		Super::ApplyToComponent(Component, CacheApplyPhase);
-		CastChecked<UCircleComponent>(Component)->ApplyComponentInstanceData(this, (CacheApplyPhase == ECacheApplyPhase::PostUserConstructionScript));
-	}
-
-	UPROPERTY()
-	bool bCircleHasBeenEdited;
-
-	UPROPERTY()
-	FCircleParams Params;
-
-	UPROPERTY()
-	FCircleCurves CircleCurves;
-
-	UPROPERTY()
-	bool bClosedLoop = true;
-
-	UPROPERTY()
-	float FullAngle = 2.0f * UE_PI;
 };
 
 /** Used to store circle data during RerunConstructionScripts */
