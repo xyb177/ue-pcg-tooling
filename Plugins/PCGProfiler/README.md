@@ -60,7 +60,7 @@ PCGProfiler 接入 PCG 框架的 Execution Inspection API，在不修改 PCG 图
 |------|------|
 | **手动** | Start Run → 触发 PCG 生成 → End Run → Export JSON |
 | **One-Click** | 自动: StartRun → CleanupAll → GenerateAll(bForce) → WaitIdle → EndRun → Export |
-| **RunBatch** | One-Click × N 迭代，含 cooldown + 收敛判定 gate |
+| **RunBatch** | One-Click × N 迭代，含 cooldown|
 
 ### 3. 自动化回归
 
@@ -94,15 +94,3 @@ PCGProfiler.WaitForRunComplete
 PCGProfiler.SetSamplingEnabled false
 ```
 
-## 验证
-
-在 **ElectricDreamsEnv SmallAssemblyGraph (1,161 节点)** 上多轮 RunBatch 实测验证：
-
-| 检查项 | 结果 |
-|--------|------|
-| SelfMs ≤ TotalMs (全 1,161 节点) | ✅ |
-| Min ≤ Avg ≤ Max | ✅ |
-| P50 ≤ P95 | ✅ |
-| GameThreadMs + WorkerThreadMs ≈ TotalMs | ✅ |
-| first_seen_time 严格递增 | ✅ |
-| node_count 与图中节点数一致 | ✅ |
