@@ -34,7 +34,7 @@ PCGProfiler 接入 PCG 框架的 Execution Inspection API，在不修改 PCG 图
 │    ├ StartRun → 启用 Inspection → EndRun → Harvest│
 │    ├ RecordNodeEvent → NodeStats + NodeEvents    │
 │    ├ OneClick / RunBatch → 自动回归采样          │
-│    └ Export → JSON + CSV + HTML Dashboard        │
+│    └ Export → JSON + HTML Dashboard        │
 ├─ 数据层 ────────────────────────────────────────┤
 │  FPCGGraphExecutionInspection (引擎内置)          │
 │    └ Timer / Stack / Pin 数据                    │
@@ -64,10 +64,9 @@ PCGProfiler 接入 PCG 框架的 Execution Inspection API，在不修改 PCG 图
 
 ### 3. 自动化回归
 
-- `per_run_summary`: 每轮独立汇总（线程负载/缓存命中/并行效率评分）
-- 跨轮稳定性：多轮各指标 CV
+- `per_run_summary`: 每轮独立汇总（线程负载/缓存命中/并行效率评分） 
 - DAG DP 关键路径提取
-- 收敛检测 + 空闲稳定性判定
+
 
 ### 4. 数据质量机制
 
