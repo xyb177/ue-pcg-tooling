@@ -52,6 +52,21 @@ void ARSBPressureSpawnerActor::EndPlay(const EEndPlayReason::Type EndPlayReason)
     Super::EndPlay(EndPlayReason);
 }
 
+void ARSBPressureSpawnerActor::HandleSpawnRequestCompleted_Implementation(int32 RequestId, AActor* SpawnedActor)
+{
+    (void)RequestId;
+
+    if (SpawnedActor)
+    {
+        TrackedSpawnedActors.AddUnique(SpawnedActor);
+    }
+}
+
+void ARSBPressureSpawnerActor::HandleSpawnRequestFailed_Implementation(int32 RequestId)
+{
+    (void)RequestId;
+}
+
 void ARSBPressureSpawnerActor::StartBurstLoop()
 {
     RemainingBursts = FMath::Max(0, BurstCount);
@@ -154,14 +169,13 @@ void ARSBPressureSpawnerActor::ExecuteBurst()
         Request.Transform = GetActorTransform();
         Request.Priority = ERSBRequestPriority::Normal;
         Request.PoolKey = PoolKey.IsNone() ? SpawnActorClass->GetFName() : PoolKey;
+        Request.RequestSourceObject = this;
 
         if (bUseAsyncSpawn)
         {
             URSBSpawnAsyncAction* Action = URSBSpawnAsyncAction::SpawnActorAsync(this, Request);
             if (Action)
             {
-                Action->OnCompleted.AddDynamic(this, &ARSBPressureSpawnerActor::HandleAsyncSpawnCompleted);
-                Action->OnFailed.AddDynamic(this, &ARSBPressureSpawnerActor::HandleAsyncSpawnFailed);
                 Action->Activate();
                 UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] PressureActor async request queued: %s"), *GetName());
             }
@@ -219,20 +233,6 @@ void ARSBPressureSpawnerActor::QueueDestroyForTrackedActors()
     }
 
     TrackedSpawnedActors.Reset();
-}
-
-void ARSBPressureSpawnerActor::HandleAsyncSpawnCompleted(AActor* SpawnedActor)
-{
-    if (SpawnedActor)
-    {
-        TrackedSpawnedActors.Add(SpawnedActor);
-        UE_LOG(LogTemp, Display, TEXT("[RuntimeSpawnBudget] PressureActor async completed: %s -> %s"), *GetName(), *GetNameSafe(SpawnedActor));
-    }
-}
-
-void ARSBPressureSpawnerActor::HandleAsyncSpawnFailed()
-{
-    UE_LOG(LogTemp, Warning, TEXT("[RuntimeSpawnBudget] PressureActor async failed: %s"), *GetName());
 }
 
 void ARSBPressureSpawnerActor::HandleDestroyTimer()

@@ -15,6 +15,7 @@ class URSBPolicyManager;
 class URSBPoolManager;
 class URSBSpawnExecutor;
 class URSBSpawnAsyncAction;
+class IRSBSpawnRequestSourceInterface;
 class ARSBPressureSpawnerActor;
 
 UCLASS()
@@ -72,8 +73,11 @@ private:
     bool EnqueueSpawnInternal(FRSBSpawnRequest Request);
     bool EnqueueDestroyInternal(FRSBDestroyRequest Request);
     TFuture<AActor*> EnqueueSpawnFutureInternal(FRSBSpawnRequest Request, TSharedPtr<TPromise<AActor*>> Promise);
+    void NotifyRequestSourceImmediate(const FRSBSpawnRequest& Request, int32 RequestId, AActor* Actor);
     void ResolveAsyncSpawnResult(int32 RequestId, AActor* Actor);
     void ResolveAsyncSpawnFailure(int32 RequestId);
+    void NotifyRequestSource(int32 RequestId, AActor* Actor);
+    void ResolveSpawnRequest(int32 RequestId, AActor* Actor);
 
 private:
     const URSBConfig* Config = nullptr;
@@ -94,6 +98,7 @@ private:
     TArray<FRSBDestroyRequest> DestroyQueues[4];
     TMap<int32, TSharedPtr<TPromise<AActor*>>> PendingSpawnPromises;
     TMap<int32, TArray<TWeakObjectPtr<URSBSpawnAsyncAction>>> PendingSpawnActions;
+    TMap<int32, TWeakObjectPtr<UObject>> PendingRequestSources;
 
     FTSTicker::FDelegateHandle TickHandle;
     int32 NextRequestId = 1;

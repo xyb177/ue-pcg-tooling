@@ -2,7 +2,22 @@
 
 #include "Engine/Engine.h"
 #include "Engine/World.h"
+#include "Interfaces/RSBSpawnRequestSourceInterface.h"
 #include "RSBSpawnBudgetSubsystem.h"
+
+namespace
+{
+    void NotifyRequestSourceFailure(const FRSBSpawnRequest& Request)
+    {
+        UObject* RequestSourceObject = Request.RequestSourceObject.Get();
+        if (!RequestSourceObject || !RequestSourceObject->GetClass()->ImplementsInterface(URSBSpawnRequestSourceInterface::StaticClass()))
+        {
+            return;
+        }
+
+        IRSBSpawnRequestSourceInterface::Execute_HandleSpawnRequestFailed(RequestSourceObject, 0);
+    }
+}
 
 URSBSpawnAsyncAction* URSBSpawnAsyncAction::SpawnActorAsync(UObject* InWorldContextObject, FRSBSpawnRequest InRequest)
 {
@@ -16,6 +31,7 @@ void URSBSpawnAsyncAction::Activate()
 {
     if (!WorldContextObject)
     {
+        NotifyRequestSourceFailure(Request);
         NotifyFailed();
         return;
     }
@@ -23,6 +39,7 @@ void URSBSpawnAsyncAction::Activate()
     UWorld* World = GEngine ? GEngine->GetWorldFromContextObject(WorldContextObject, EGetWorldErrorMode::ReturnNull) : nullptr;
     if (!World)
     {
+        NotifyRequestSourceFailure(Request);
         NotifyFailed();
         return;
     }
@@ -30,6 +47,7 @@ void URSBSpawnAsyncAction::Activate()
     Subsystem = World->GetSubsystem<URSBSpawnBudgetSubsystem>();
     if (!Subsystem)
     {
+        NotifyRequestSourceFailure(Request);
         NotifyFailed();
         return;
     }
@@ -37,6 +55,7 @@ void URSBSpawnAsyncAction::Activate()
     const int32 EnqueuedRequestId = Subsystem->PrepareSpawnRequest(Request);
     if (EnqueuedRequestId <= 0)
     {
+        NotifyRequestSourceFailure(Request);
         NotifyFailed();
         return;
     }

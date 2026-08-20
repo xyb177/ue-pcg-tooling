@@ -11,11 +11,29 @@
 #include "RSBSpawnAsyncAction.h"
 #include "RSBSpawnExecutor.h"
 #include "RSBPressureSpawnerActor.h"
+#include "Interfaces/RSBSpawnRequestSourceInterface.h"
 #include "Interfaces/RSBPoolableInterface.h"
 
 namespace
 {
     constexpr int32 RSBPriorityCount = 4;
+
+    void NotifyRequestSourceObject(UObject* RequestSourceObject, int32 RequestId, AActor* Actor)
+    {
+        if (!RequestSourceObject || !RequestSourceObject->GetClass()->ImplementsInterface(URSBSpawnRequestSourceInterface::StaticClass()))
+        {
+            return;
+        }
+
+        if (Actor)
+        {
+            IRSBSpawnRequestSourceInterface::Execute_HandleSpawnRequestCompleted(RequestSourceObject, RequestId, Actor);
+        }
+        else
+        {
+            IRSBSpawnRequestSourceInterface::Execute_HandleSpawnRequestFailed(RequestSourceObject, RequestId);
+        }
+    }
 }
 
 void URSBSpawnBudgetSubsystem::Initialize(FSubsystemCollectionBase& Collection)
@@ -110,6 +128,22 @@ void URSBSpawnBudgetSubsystem::Deinitialize()
         TickHandle.Reset();
     }
 
+    TSet<int32> PendingRequestIds;
+    TArray<int32> PendingIds;
+    PendingSpawnPromises.GenerateKeyArray(PendingIds);
+    PendingRequestIds.Append(PendingIds);
+    PendingIds.Reset();
+    PendingSpawnActions.GenerateKeyArray(PendingIds);
+    PendingRequestIds.Append(PendingIds);
+    PendingIds.Reset();
+    PendingRequestSources.GenerateKeyArray(PendingIds);
+    PendingRequestIds.Append(PendingIds);
+
+    for (int32 RequestId : PendingRequestIds)
+    {
+        ResolveSpawnRequest(RequestId, nullptr);
+    }
+
     SpawnQueues[0].Reset();
     SpawnQueues[1].Reset();
     SpawnQueues[2].Reset();
@@ -118,20 +152,6 @@ void URSBSpawnBudgetSubsystem::Deinitialize()
     DestroyQueues[1].Reset();
     DestroyQueues[2].Reset();
     DestroyQueues[3].Reset();
-
-    TArray<int32> PendingIds;
-    PendingSpawnPromises.GenerateKeyArray(PendingIds);
-    for (int32 RequestId : PendingIds)
-    {
-        ResolveAsyncSpawnFailure(RequestId);
-    }
-
-    TArray<int32> PendingActionIds;
-    PendingSpawnActions.GenerateKeyArray(PendingActionIds);
-    for (int32 RequestId : PendingActionIds)
-    {
-        ResolveAsyncSpawnFailure(RequestId);
-    }
 
     SpawnExecutor = nullptr;
     PoolManager = nullptr;
@@ -146,6 +166,7 @@ bool URSBSpawnBudgetSubsystem::EnqueueSpawn(FRSBSpawnRequest Request)
 {
     if (!IsSystemEnabled())
     {
+        NotifyRequestSourceImmediate(Request, 0, nullptr);
         return false;
     }
 
@@ -155,14 +176,21 @@ bool URSBSpawnBudgetSubsystem::EnqueueSpawn(FRSBSpawnRequest Request)
     }
 
     FRSBSpawnRequest Copy = MoveTemp(Request);
-    AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<URSBSpawnBudgetSubsystem>(this), Copy = MoveTemp(Copy)]() mutable
+    TSharedPtr<TPromise<bool>> Promise = MakeShared<TPromise<bool>>();
+    TFuture<bool> Future = Promise->GetFuture();
+    AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<URSBSpawnBudgetSubsystem>(this), Copy = MoveTemp(Copy), Promise]() mutable
     {
         if (URSBSpawnBudgetSubsystem* StrongThis = WeakThis.Get())
         {
-            StrongThis->EnqueueSpawnInternal(MoveTemp(Copy));
+            Promise->SetValue(StrongThis->EnqueueSpawnInternal(MoveTemp(Copy)));
+        }
+        else
+        {
+            Promise->SetValue(false);
         }
     });
-    return true;
+    Future.Wait();
+    return Future.Get();
 }
 
 TFuture<AActor*> URSBSpawnBudgetSubsystem::EnqueueSpawnFuture(FRSBSpawnRequest Request)
@@ -173,6 +201,7 @@ TFuture<AActor*> URSBSpawnBudgetSubsystem::EnqueueSpawnFuture(FRSBSpawnRequest R
     if (!IsSystemEnabled())
     {
         Promise->SetValue(nullptr);
+        NotifyRequestSourceImmediate(Request, 0, nullptr);
         return Future;
     }
 
@@ -209,14 +238,21 @@ bool URSBSpawnBudgetSubsystem::EnqueueDestroy(FRSBDestroyRequest Request)
     }
 
     FRSBDestroyRequest Copy = MoveTemp(Request);
-    AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<URSBSpawnBudgetSubsystem>(this), Copy = MoveTemp(Copy)]() mutable
+    TSharedPtr<TPromise<bool>> Promise = MakeShared<TPromise<bool>>();
+    TFuture<bool> Future = Promise->GetFuture();
+    AsyncTask(ENamedThreads::GameThread, [WeakThis = TWeakObjectPtr<URSBSpawnBudgetSubsystem>(this), Copy = MoveTemp(Copy), Promise]() mutable
     {
         if (URSBSpawnBudgetSubsystem* StrongThis = WeakThis.Get())
         {
-            StrongThis->EnqueueDestroyInternal(MoveTemp(Copy));
+            Promise->SetValue(StrongThis->EnqueueDestroyInternal(MoveTemp(Copy)));
+        }
+        else
+        {
+            Promise->SetValue(false);
         }
     });
-    return true;
+    Future.Wait();
+    return Future.Get();
 }
 
 void URSBSpawnBudgetSubsystem::PrewarmPool(TSubclassOf<AActor> ActorClass, FName PoolKey, int32 Count)
@@ -366,13 +402,22 @@ int32 URSBSpawnBudgetSubsystem::PrepareSpawnRequest(FRSBSpawnRequest& Request)
 
     Request.RequestId = NextRequestId++;
     Request.EnqueuedAtSeconds = FPlatformTime::Seconds();
+    if (Request.RequestSourceObject)
+    {
+        PendingRequestSources.Add(Request.RequestId, TWeakObjectPtr<UObject>(Request.RequestSourceObject));
+    }
     SpawnQueues[PriorityToIndex(Request.Priority)].Add(Request);
     return Request.RequestId;
 }
 
 bool URSBSpawnBudgetSubsystem::EnqueueSpawnInternal(FRSBSpawnRequest Request)
 {
-    return PrepareSpawnRequest(Request) > 0;
+    const bool bAccepted = PrepareSpawnRequest(Request) > 0;
+    if (!bAccepted)
+    {
+        NotifyRequestSourceImmediate(Request, 0, nullptr);
+    }
+    return bAccepted;
 }
 
 TFuture<AActor*> URSBSpawnBudgetSubsystem::EnqueueSpawnFutureInternal(FRSBSpawnRequest Request, TSharedPtr<TPromise<AActor*>> Promise)
@@ -382,6 +427,7 @@ TFuture<AActor*> URSBSpawnBudgetSubsystem::EnqueueSpawnFutureInternal(FRSBSpawnR
     if (RequestId <= 0)
     {
         Promise->SetValue(nullptr);
+        NotifyRequestSourceImmediate(Request, 0, nullptr);
         return Future;
     }
 
@@ -451,6 +497,31 @@ void URSBSpawnBudgetSubsystem::ResolveAsyncSpawnFailure(int32 RequestId)
     ResolveAsyncSpawnResult(RequestId, nullptr);
 }
 
+void URSBSpawnBudgetSubsystem::NotifyRequestSourceImmediate(const FRSBSpawnRequest& Request, int32 RequestId, AActor* Actor)
+{
+    NotifyRequestSourceObject(Request.RequestSourceObject.Get(), RequestId, Actor);
+}
+
+void URSBSpawnBudgetSubsystem::NotifyRequestSource(int32 RequestId, AActor* Actor)
+{
+    if (TWeakObjectPtr<UObject>* PendingSource = PendingRequestSources.Find(RequestId))
+    {
+        NotifyRequestSourceObject(PendingSource->Get(), RequestId, Actor);
+        PendingRequestSources.Remove(RequestId);
+    }
+}
+
+void URSBSpawnBudgetSubsystem::ResolveSpawnRequest(int32 RequestId, AActor* Actor)
+{
+    if (RequestId <= 0)
+    {
+        return;
+    }
+
+    NotifyRequestSource(RequestId, Actor);
+    ResolveAsyncSpawnResult(RequestId, Actor);
+}
+
 bool URSBSpawnBudgetSubsystem::Tick(float DeltaTime)
 {
     (void)DeltaTime;
@@ -494,7 +565,7 @@ bool URSBSpawnBudgetSubsystem::Tick(float DeltaTime)
 
             if (Request.DeadlineSeconds >= 0.0f && CurrentSeconds > Request.DeadlineSeconds)
             {
-                ResolveAsyncSpawnFailure(Request.RequestId);
+                ResolveSpawnRequest(Request.RequestId, nullptr);
                 ++Dropped;
                 continue;
             }
@@ -540,12 +611,12 @@ bool URSBSpawnBudgetSubsystem::Tick(float DeltaTime)
             {
                 const float SpawnCostMs = static_cast<float>((FPlatformTime::Seconds() - SpawnStartSeconds) * 1000.0);
                 MetricsCollector->AddActorClassSpawnSample(Request.ActorClass.Get(), SpawnCostMs, bPoolHit);
-                ResolveAsyncSpawnResult(Request.RequestId, SpawnedActor);
+                ResolveSpawnRequest(Request.RequestId, SpawnedActor);
                 ++SpawnProcessed;
             }
             else
             {
-                ResolveAsyncSpawnFailure(Request.RequestId);
+                ResolveSpawnRequest(Request.RequestId, nullptr);
             }
         }
     };

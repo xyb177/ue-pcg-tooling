@@ -18,4 +18,10 @@ class RUNTIMESPAWNBUDGET_API IRSBSpawnRequestSourceInterface
 public:
     UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category="RuntimeSpawnBudget")
     bool BuildSpawnRequest(FRSBSpawnRequest& OutRequest) const;
+
+    UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category="RuntimeSpawnBudget")
+    void HandleSpawnRequestCompleted(int32 RequestId, AActor* SpawnedActor);
+
+    UFUNCTION(BlueprintNativeEvent, BlueprintCallable, Category="RuntimeSpawnBudget")
+    void HandleSpawnRequestFailed(int32 RequestId);
 };

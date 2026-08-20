@@ -2,6 +2,7 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "Interfaces/RSBSpawnRequestSourceInterface.h"
 #include "RSBTypes.h"
 #include "RSBPressureSpawnerActor.generated.h"
 
@@ -9,7 +10,7 @@ class URSBSpawnBudgetSubsystem;
 class URSBSpawnAsyncAction;
 
 UCLASS(BlueprintType, Blueprintable)
-class RUNTIMESPAWNBUDGET_API ARSBPressureSpawnerActor : public AActor
+class RUNTIMESPAWNBUDGET_API ARSBPressureSpawnerActor : public AActor, public IRSBSpawnRequestSourceInterface
 {
     GENERATED_BODY()
 
@@ -18,6 +19,8 @@ public:
 
     virtual void BeginPlay() override;
     virtual void EndPlay(const EEndPlayReason::Type EndPlayReason) override;
+    virtual void HandleSpawnRequestCompleted_Implementation(int32 RequestId, AActor* SpawnedActor) override;
+    virtual void HandleSpawnRequestFailed_Implementation(int32 RequestId) override;
 
     UPROPERTY(EditAnywhere, BlueprintReadWrite, Category="RuntimeSpawnBudget")
     TSubclassOf<AActor> SpawnActorClass;
@@ -54,10 +57,6 @@ private:
     TSubclassOf<AActor> ResolveSpawnActorClassFromWorld() const;
     void ExecuteBurst();
     void QueueDestroyForTrackedActors();
-    UFUNCTION()
-    void HandleAsyncSpawnCompleted(AActor* SpawnedActor);
-    UFUNCTION()
-    void HandleAsyncSpawnFailed();
     UFUNCTION()
     void HandleDestroyTimer();
     URSBSpawnBudgetSubsystem* ResolveSubsystem() const;

@@ -18,6 +18,8 @@ struct FRSBSpawnRequest
 {
     GENERATED_BODY()
 
+    FRSBSpawnRequest() = default;
+
     UPROPERTY(BlueprintReadWrite, Category="RuntimeSpawnBudget")
     TSubclassOf<AActor> ActorClass;
 
@@ -32,6 +34,9 @@ struct FRSBSpawnRequest
 
     UPROPERTY(BlueprintReadWrite, Category="RuntimeSpawnBudget")
     FName Tag = NAME_None;
+
+    UPROPERTY(BlueprintReadWrite, Category="RuntimeSpawnBudget")
+    TObjectPtr<UObject> RequestSourceObject = nullptr;
 
     UPROPERTY(BlueprintReadWrite, Category="RuntimeSpawnBudget")
     bool bAllowPooling = true;

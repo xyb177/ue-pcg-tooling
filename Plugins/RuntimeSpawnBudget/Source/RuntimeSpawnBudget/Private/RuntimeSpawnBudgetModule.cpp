@@ -356,10 +356,10 @@ public:
             TEXT("  PendingAsync=%d\n\n")
             TEXT("Last Frame\n")
             TEXT("  Frame=%lld Queue=%d SpawnProcessed=%d DestroyProcessed=%d Dropped=%d\n")
-            TEXT("  SpawnTime=%.3fms DestroyTime=%.3fms FrameTotal=%.3fms MaxQueueDelay=%.3fms\n\n")
+            TEXT("  SpawnPhaseTime=%.3fms DestroyTime=%.3fms FrameTotal=%.3fms MaxQueueDelay=%.3fms\n\n")
             TEXT("Window\n")
             TEXT("  AvgQueueDelay=%.3fms P95QueueDelay=%.3fms\n")
-            TEXT("  AvgSpawnTime=%.3fms P95SpawnTime=%.3fms\n")
+            TEXT("  AvgSpawnPhaseTime=%.3fms P95SpawnPhaseTime=%.3fms\n")
             TEXT("  PeakFrameTime=%.3fms\n")
             TEXT("  PoolHitRate=%.2f%%\n")
             TEXT("World Actor Catalog (top %d):%s"),
